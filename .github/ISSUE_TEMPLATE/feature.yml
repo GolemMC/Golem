@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose focused behavior for Golem
+title: "feat: "
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem being solved
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: Explain protocol, world-format, persistence, or client compatibility effects.
+    validations:
+      required: true

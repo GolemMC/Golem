@@ -1,0 +1,9 @@
+Minecraft Java Edition version: 1.21.1
+Protocol version: 767
+Source project: PrismarineJS minecraft-data
+Source repository: https://github.com/PrismarineJS/minecraft-data
+Source license: MIT
+
+These reviewed JSON inputs are pinned repository fixtures. Normal builds do not
+download data or run the generator. Run `make generate` after an intentional
+fixture update and `make verify-generated` to check committed output freshness.
