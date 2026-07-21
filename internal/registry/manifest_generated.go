@@ -6,6 +6,6 @@ package registry
 const (
 	BlockFixtureSHA256  = "7d1d95c4e0255f9f269293e8077c7923c9ec0ff902a9a475ed131da8b26bc654"
 	EntityFixtureSHA256 = "abc419e378564603f249cfeb1d5ee7cd2a0ec3bf7c7fb1ba7d704bb0e7454038"
-	FixtureSHA256       = "f16228ac99d63559b1eb704ebd7e5e649b5ac92eccea922babfe0ae4c5a7f092"
+	FixtureSHA256       = "43559bc67aca8059813ca36a478dd8ce64603a1742db4090f163d5bf48e5e457"
 	ItemFixtureSHA256   = "f0960c81bbd2b10f9ab6187c567dec4f88fee7893d7b119423045abb635631f6"
 )
