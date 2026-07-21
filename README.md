@@ -1,7 +1,11 @@
 # Golem
 A Minecraft server software made in Go.
 
-[add badges]
+[![Validate](https://github.com/GolemMC/Golem/actions/workflows/validate.yml/badge.svg)](https://github.com/GolemMC/Golem/actions/workflows/validate.yml)
+![Status](https://img.shields.io/badge/status-experimental-orange)
+![Minecraft](https://img.shields.io/badge/Minecraft%20Java-1.21.1-62B47A)
+![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
+![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 
 ## About
 Golem is an experimental Miencraft server for Java Edition written in Go.
