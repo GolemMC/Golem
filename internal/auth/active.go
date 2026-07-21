@@ -7,8 +7,6 @@ import (
 	"sync"
 )
 
-// ActiveLogins provides duplicate-account and player-capacity protection for
-// authenticated identities. It deliberately contains no connection behavior.
 type ActiveLogins struct {
 	mu      sync.Mutex
 	maximum int

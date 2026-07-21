@@ -47,6 +47,7 @@ func main() {
 	listen := flags.String("listen", "", "override Minecraft listener as address:port")
 	diagnosticsListen := flags.String("diagnostics-listen", "", "override diagnostics listener as address:port")
 	logLevel := flags.String("log-level", "", "override log level: debug, info, warn, or error")
+	debugMode := flags.Bool("debug", false, "enable detailed debug logging with source locations")
 	memoryLimit := flags.String("memory-limit", "", "Go runtime soft memory target, for example 512MiB or 0")
 	worldPath := flags.String("world", "", "override the world directory")
 	showVersion := flags.Bool("version", false, "print version and exit")
@@ -58,7 +59,7 @@ func main() {
 		fmt.Fprintf(flags.Output(), "Usage: golem [options]\n       golem generate-config [--config path]\n\n")
 		flags.PrintDefaults()
 		fmt.Fprintln(flags.Output(), "\nPrecedence: CLI flags > GOLEM_* environment variables > TOML > defaults.")
-		fmt.Fprintln(flags.Output(), "Common environment variables: GOLEM_SERVER_PORT, GOLEM_WORLD_PATH, GOLEM_RUNTIME_MAX_PROCS, GOLEM_RUNTIME_MEMORY_LIMIT, GOLEM_DIAGNOSTICS_TOKEN.")
+		fmt.Fprintln(flags.Output(), "Common environment variables: GOLEM_SERVER_PORT, GOLEM_WORLD_PATH, GOLEM_RUNTIME_MAX_PROCS, GOLEM_RUNTIME_MEMORY_LIMIT, GOLEM_DIAGNOSTICS_TOKEN, GOLEM_DEBUG.")
 	}
 	_ = flags.Parse(os.Args[1:])
 	if *showVersion {
@@ -77,7 +78,7 @@ func main() {
 		os.Exit(2)
 	}
 	base := filepath.Dir(load.Path)
-	overrides := config.Overrides{Listen: *listen, DiagnosticsListen: *diagnosticsListen, LogLevel: *logLevel, MemoryLimit: *memoryLimit, World: *worldPath}
+	overrides := config.Overrides{Listen: *listen, DiagnosticsListen: *diagnosticsListen, LogLevel: *logLevel, Debug: *debugMode, MemoryLimit: *memoryLimit, World: *worldPath}
 	if maxProcs.set {
 		overrides.MaxProcs = &maxProcs.value
 	}
@@ -107,6 +108,14 @@ func main() {
 	}
 	slog.SetDefault(log)
 	log.Info("configuration loaded", "path", load.Path)
+	log.Debug("debug logging enabled",
+		"go_version", runtime.Version(),
+		"os", runtime.GOOS,
+		"architecture", runtime.GOARCH,
+		"pid", os.Getpid(),
+		"max_procs", runtime.GOMAXPROCS(0),
+		"memory_limit", config.FormatBytes(int64(cfg.Runtime.MemoryLimit)),
+	)
 	for _, warning := range unique(load.Warnings) {
 		log.Warn(warning)
 	}
