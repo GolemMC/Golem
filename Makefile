@@ -2,7 +2,7 @@
 
 build:
 	mkdir -p build
-	CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o build/golem ./cmd/golem
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o build/ ./cmd/golem
 
 test:
 	go test ./...

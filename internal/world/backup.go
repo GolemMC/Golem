@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -130,6 +131,9 @@ func pruneBackups(dir, prefix string, retention int) error {
 }
 
 func syncDir(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open directory for sync %q: %w", path, err)

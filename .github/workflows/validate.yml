@@ -17,7 +17,10 @@ jobs:
           printf '%s\n' "$PR_TITLE" | grep -Eq '^(feat|fix|refactor|test|chore|docs|build|ci|perf|revert)(\([a-z0-9._/-]+\))?!?: .+'
 
   go:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v7
@@ -25,6 +28,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: |
           unformatted="$(gofmt -l $(find cmd internal tests tools -type f -name '*.go'))"
           if [ -n "$unformatted" ]; then
@@ -34,4 +38,6 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: make architecture
+        if: matrix.os == 'ubuntu-latest'
       - run: make verify-generated
+        if: matrix.os == 'ubuntu-latest'

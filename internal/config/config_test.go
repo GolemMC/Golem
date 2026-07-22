@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,8 +27,10 @@ func TestFirstLaunchGeneratesSecureConfigAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("mode=%04o, want 0600", got)
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("mode=%04o, want 0600", got)
+		}
 	}
 }
 
@@ -37,7 +40,7 @@ func TestFirstLaunchStillFailsClearlyWhenWorldIsMissing(t *testing.T) {
 	if !result.Generated {
 		t.Fatal("configuration was not generated")
 	}
-	if err == nil || !strings.Contains(err.Error(), "world.path") || !strings.Contains(err.Error(), "no such file") {
+	if err == nil || !strings.Contains(err.Error(), "world.path") {
 		t.Fatalf("expected clear missing-world error, got %v", err)
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
@@ -62,8 +65,10 @@ func TestBroadConfigurationPermissionsProduceWarning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "permissions 0644") {
-		t.Fatalf("permission warning missing: %v", result.Warnings)
+	if runtime.GOOS != "windows" {
+		if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "permissions 0644") {
+			t.Fatalf("permission warning missing: %v", result.Warnings)
+		}
 	}
 }
 

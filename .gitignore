@@ -26,3 +26,5 @@ tmp/
 *.mca
 *.test
 *.out
+*.exe
+*.exe~
