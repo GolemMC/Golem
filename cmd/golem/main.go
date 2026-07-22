@@ -68,12 +68,15 @@ func main() {
 	}
 
 	cfg, load, err := config.LoadOrCreate(*configPath, os.Environ())
-	if load.Generated {
-		fmt.Println("It looks like this is Golem's first launch.")
-		fmt.Printf("A new configuration file was created at %s.\n", load.Path)
-		fmt.Println("Review the generated settings before exposing this server publicly.")
-	}
 	if err != nil {
+		if load.Generated {
+			bootstrapLog, logErr := logging.New(config.Defaults().Logging, os.Stdout)
+			if logErr != nil {
+				fmt.Fprintln(os.Stderr, "logging error:", logErr)
+				os.Exit(2)
+			}
+			logFirstLaunch(bootstrapLog, load.Path)
+		}
 		fmt.Fprintln(os.Stderr, "configuration error:", err)
 		os.Exit(2)
 	}
@@ -107,6 +110,9 @@ func main() {
 		os.Exit(2)
 	}
 	slog.SetDefault(log)
+	if load.Generated {
+		logFirstLaunch(log, load.Path)
+	}
 	log.Info("configuration loaded", "path", load.Path)
 	log.Debug("debug logging enabled",
 		"go_version", runtime.Version(),
@@ -129,6 +135,10 @@ func main() {
 		log.Error("server stopped with an error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func logFirstLaunch(log *slog.Logger, path string) {
+	log.Info("first launch; configuration created", "path", path)
 }
 
 func unique(values []string) []string {
