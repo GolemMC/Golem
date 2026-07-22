@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -231,9 +232,219 @@ func TestProtocol767BlockInteractionDecoders(t *testing.T) {
 	creative.VarInt(stone.ID)
 	creative.VarInt(0)
 	creative.VarInt(0)
-	slot, item, err := decodeCreativeSlot(creative.Bytes())
-	if err != nil || slot != 0 || item.ID != "minecraft:stone" || item.Count != 64 {
-		t.Fatalf("creative slot=%d item=%+v err=%v", slot, item, err)
+	change, err := decodeCreativeSlot(creative.Bytes())
+	if err != nil || !change.apply || change.slot != 0 || change.item.ID != "minecraft:stone" || change.item.Count != 64 {
+		t.Fatalf("creative change=%+v err=%v", change, err)
+	}
+}
+
+func TestCreativeBulkClearPacketSequence(t *testing.T) {
+	applied := 0
+	for networkSlot := int16(0); networkSlot <= 45; networkSlot++ {
+		var packet protocol.Encoder
+		packet.Int16(networkSlot)
+		packet.VarInt(0)
+		change, err := decodeCreativeSlot(packet.Bytes())
+		if err != nil {
+			t.Fatalf("slot %d: %v", networkSlot, err)
+		}
+		if networkSlot <= 4 && change.apply {
+			t.Fatalf("crafting slot %d was treated as persistent inventory", networkSlot)
+		}
+		if change.networkSlot != networkSlot || !change.empty {
+			t.Fatalf("slot %d decoded as %+v", networkSlot, change)
+		}
+		if networkSlot >= 5 && !change.apply {
+			t.Fatalf("player inventory slot %d was ignored", networkSlot)
+		}
+		if networkSlot == 45 && change.slot != -106 {
+			t.Fatalf("offhand mapped to slot %d", change.slot)
+		}
+		if change.apply {
+			applied++
+		}
+		if change.resync != (networkSlot == 45) {
+			t.Fatalf("slot %d resync=%v", networkSlot, change.resync)
+		}
+	}
+	if applied != 41 {
+		t.Fatalf("applied changes=%d, want 41", applied)
+	}
+
+	stone, exists, err := registry.ItemByName("minecraft:stone")
+	if err != nil || !exists {
+		t.Fatal("stone item is unavailable")
+	}
+	var invalid protocol.Encoder
+	invalid.Int16(0)
+	invalid.VarInt(1)
+	invalid.VarInt(stone.ID)
+	invalid.VarInt(0)
+	invalid.VarInt(0)
+	if _, err := decodeCreativeSlot(invalid.Bytes()); err == nil {
+		t.Fatal("non-empty creative crafting slot was accepted")
+	}
+}
+
+func TestCreativeBulkClearDoesNotDisconnect(t *testing.T) {
+	server, simulation, cancelGame := testServer(t)
+	defer cancelGame()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id := game.PlayerID{8}
+	events := make(chan game.Event, 256)
+	self, _, err := simulation.Join(ctx, game.Player{ID: id, Username: "builder", Position: game.Vec3{Y: 64}}, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, game.ItemStack{ID: "minecraft:stone", Count: 64}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, -106, game.ItemStack{ID: "minecraft:shield", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	serverConnection, clientConnection := net.Pipe()
+	codec := protocol.FrameCodec{MaxPacketBytes: 2 << 20, CompressionThreshold: -1}
+	identity := auth.Identity{UUID: [16]byte(id), Username: self.Username}
+	player := newPlayerSession(ctx, server, identity, self, serverConnection, codec, events)
+	player.startWriter()
+	done := make(chan error, 1)
+	go func() { done <- server.playLoop(ctx, player) }()
+
+	started := time.Now()
+	for networkSlot := int16(0); networkSlot <= 45; networkSlot++ {
+		var packet protocol.Encoder
+		packet.Int16(networkSlot)
+		packet.VarInt(0)
+		if err := codec.Write(clientConnection, protocol.PlayServerboundCreativeSlot, packet.Bytes()); err != nil {
+			t.Fatalf("write slot %d: %v", networkSlot, err)
+		}
+	}
+
+	packetID, payload, err := codec.Read(clientConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("bulk clear took %s, want less than 1s", elapsed)
+	}
+	if packetID != protocol.PlayClientboundInventoryContent {
+		t.Fatalf("packet=%x, want inventory content", packetID)
+	}
+	decoder := protocol.NewDecoder(payload)
+	windowID, err := decoder.Byte()
+	if err != nil || windowID != 0 {
+		t.Fatalf("window=%d err=%v", windowID, err)
+	}
+	stateID, err := decoder.VarInt()
+	if err != nil || stateID != 0 {
+		t.Fatalf("state=%d err=%v", stateID, err)
+	}
+	count, err := decoder.VarInt()
+	if err != nil || count != 46 {
+		t.Fatalf("slot count=%d err=%v", count, err)
+	}
+	for slot := int32(0); slot < count; slot++ {
+		itemCount, err := decoder.VarInt()
+		if err != nil || itemCount != 0 {
+			t.Fatalf("slot %d count=%d err=%v", slot, itemCount, err)
+		}
+	}
+	carried, err := decoder.VarInt()
+	if err != nil || carried != 0 || decoder.Remaining() != 0 {
+		t.Fatalf("carried=%d remaining=%d err=%v", carried, decoder.Remaining(), err)
+	}
+
+	_ = clientConnection.Close()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("play loop did not stop")
+	}
+}
+
+func TestCreativeClearPrefixDoesNotClearInventory(t *testing.T) {
+	server, simulation, cancelGame := testServer(t)
+	defer cancelGame()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id := game.PlayerID{9}
+	events := make(chan game.Event, 256)
+	self, _, err := simulation.Join(ctx, game.Player{ID: id, Username: "builder", Position: game.Vec3{Y: 64}}, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 9, game.ItemStack{ID: "minecraft:dirt", Count: 32}); err != nil {
+		t.Fatal(err)
+	}
+
+	serverConnection, clientConnection := net.Pipe()
+	codec := protocol.FrameCodec{MaxPacketBytes: 2 << 20, CompressionThreshold: -1}
+	identity := auth.Identity{UUID: [16]byte(id), Username: self.Username}
+	player := newPlayerSession(ctx, server, identity, self, serverConnection, codec, events)
+	player.startWriter()
+	done := make(chan error, 1)
+	go func() { done <- server.playLoop(ctx, player) }()
+
+	var prefix protocol.Encoder
+	prefix.Int16(0)
+	prefix.VarInt(0)
+	if err := codec.Write(clientConnection, protocol.PlayServerboundCreativeSlot, prefix.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	stone, exists, err := registry.ItemByName("minecraft:stone")
+	if err != nil || !exists {
+		t.Fatal("stone item is unavailable")
+	}
+	var hotbar protocol.Encoder
+	hotbar.Int16(36)
+	hotbar.VarInt(1)
+	hotbar.VarInt(stone.ID)
+	hotbar.VarInt(0)
+	hotbar.VarInt(0)
+	if err := codec.Write(clientConnection, protocol.PlayServerboundCreativeSlot, hotbar.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	var offhand protocol.Encoder
+	offhand.Int16(45)
+	offhand.VarInt(0)
+	if err := codec.Write(clientConnection, protocol.PlayServerboundCreativeSlot, offhand.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if packetID, _, err := codec.Read(clientConnection); err != nil {
+		t.Fatal(err)
+	} else if packetID != protocol.PlayClientboundInventoryContent {
+		t.Fatalf("packet=%x, want inventory content", packetID)
+	}
+
+	inventory, err := simulation.SetCreativeInventorySlot(ctx, id, 1, game.ItemStack{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirtFound bool
+	for _, item := range inventory {
+		if item.Slot == 9 && item.ID == "minecraft:dirt" && item.Count == 32 {
+			dirtFound = true
+		}
+	}
+	if !dirtFound {
+		t.Fatalf("interrupted clear removed existing inventory: %+v", inventory)
+	}
+
+	_ = clientConnection.Close()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("play loop did not stop")
 	}
 }
 

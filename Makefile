@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt lint generate verify-generated integration architecture clean check
+.PHONY: build test test-race vet fmt fmt-check lint generate verify-generated integration architecture clean check
 
 build:
 	mkdir -p build
@@ -15,6 +15,13 @@ vet:
 
 fmt:
 	gofmt -w $$(find cmd internal tests tools -type f -name '*.go')
+
+fmt-check:
+	@files="$$(gofmt -l $$(find cmd internal tests tools -type f -name '*.go'))"; \
+	if [ -n "$$files" ]; then \
+		echo "$$files"; \
+		exit 1; \
+	fi
 
 lint: vet architecture verify-generated
 
@@ -33,4 +40,4 @@ architecture:
 clean:
 	rm -rf build
 
-check: test vet architecture verify-generated
+check: fmt-check test vet architecture verify-generated

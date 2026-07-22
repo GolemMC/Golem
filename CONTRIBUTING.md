@@ -22,7 +22,7 @@ Draft pull requests are welcome when you want early feedback.
 You need:
 
 - a Linux machine (WSL, a server or your own machine)
-- Go 1.26 or newer
+- Go 1.24 or newer
 - Git
 - Make
 - A Minecraft 1.21.1 world for manual testing
@@ -32,7 +32,7 @@ Clone the repository:
 ```bash
 git clone https://github.com/GolemMC/Golem.git
 cd Golem
-````
+```
 
 Install dependencies:
 
