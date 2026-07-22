@@ -32,44 +32,44 @@ The labels below are intentionally conservative:
 
 ### Protocol and connections
 
-- **Working** — server list status and favicon
-- **Working** — online-mode RSA login, encrypted sessions, and Mojang profile verification
-- **Working** — 1.21.1 login, configuration, registry, and play-state handshakes
-- **Working** — bounded packet sizes, connection limits, timeouts, and outbound backpressure
-- **Partial** — play packets for movement, chat, creative inventory, and basic block interaction
-- **Planned** — additional Minecraft versions and protocol translation
+- **Working:** server list status and favicon
+- **Working:** online-mode RSA login, encrypted sessions, and Mojang profile verification
+- **Working:** 1.21.1 login, configuration, registry, and play-state handshakes
+- **Working:** bounded packet sizes, connection limits, timeouts, and outbound backpressure
+- **Partial:** play packets for movement, chat, creative inventory, and basic block interaction
+- **Planned:** additional Minecraft versions and protocol translation
 
 ### World
 
-- **Working** — existing Anvil Overworld loading
-- **Working** — world-version validation and exclusive world locking
-- **Working** — startup backups with retention
-- **Working** — serialized, atomic region and player-data writes
-- **Working** — autosave, manual save, disconnect save, and synchronous shutdown save
-- **Partial** — creative placement for simple blocks without state properties
-- **Partial** — block breaking without drops, tools, or Survival rules
-- **Partial** — entity-region files can be decoded, but entities are not spawned or ticked
-- **Planned** — terrain generation, additional dimensions, lighting updates, fluids, and redstone
+- **Working:** existing Anvil Overworld loading
+- **Working:** world-version validation and exclusive world locking
+- **Working:** startup backups with retention
+- **Working:** serialized, atomic region and player-data writes
+- **Working:** autosave, manual save, disconnect save, and synchronous shutdown save
+- **Partial:** creative placement for simple blocks without state properties
+- **Partial:** block breaking without drops, tools, or Survival rules
+- **Partial:** entity-region files can be decoded, but entities are not spawned or ticked
+- **Planned:** terrain generation, additional dimensions, lighting updates, fluids, and redstone
 
 ### Players and gameplay
 
-- **Working** — joining, leaving, tab-list visibility, and basic multiplayer movement
-- **Working** — multiplayer chat
-- **Working** — position, rotation, selected hotbar, and inventory persistence
-- **Partial** — creative inventory slot changes and bulk inventory clearing
-- **Partial** — multiplayer block updates after successful disk persistence
-- **Planned** — Survival mode, health, hunger, experience, combat, item drops, and crafting
-- **Planned** — mobs, entity AI, vehicles, effects, bosses, and advancements
+- **Working:** joining, leaving, tab-list visibility, and basic multiplayer movement
+- **Working:** multiplayer chat
+- **Working:** position, rotation, selected hotbar, and inventory persistence
+- **Partial:** creative inventory slot changes and bulk inventory clearing
+- **Partial:** multiplayer block updates after successful disk persistence
+- **Planned:** Survival mode, health, hunger, experience, combat, item drops, and crafting
+- **Planned:** mobs, entity AI, vehicles, effects, bosses, and advancements
 
 ### Server operation
 
-- **Working** — strict TOML configuration with environment and CLI overrides
-- **Working** — secure first-launch configuration generation
-- **Working** — compact text logs, JSON logs, and debug logging
-- **Working** — health, readiness, Prometheus metrics, and JSON diagnostics endpoints
-- **Working** — `help`, `list`, `save`, and `stop` console commands
-- **Working** — graceful shutdown and Linux builds without CGO
-- **Planned** — RCON, query, permissions, proxy support, and a public plugin API
+- **Working:** strict TOML configuration with environment and CLI overrides
+- **Working:** secure first-launch configuration generation
+- **Working:** compact text logs, JSON logs, and debug logging
+- **Working:** health, readiness, Prometheus metrics, and JSON diagnostics endpoints
+- **Working:** `help`, `list`, `save`, and `stop` console commands
+- **Working:** graceful shutdown and Linux builds without CGO
+- **Planned:** RCON, query, permissions, proxy support, and a public plugin API
 
 ## What should come next
 
