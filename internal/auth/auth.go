@@ -92,7 +92,7 @@ func (v *MojangVerifier) Verify(ctx context.Context, username, serverHash string
 }
 
 func GenerateKey() (*rsa.PrivateKey, []byte, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
 	}
