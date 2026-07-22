@@ -65,7 +65,6 @@ func (w *World) PlaceBlock(x, y, z int32, state BlockState) (BlockState, error) 
 	return old[0], nil
 }
 
-// PlaceBlocks changes a bounded group only when every target is currently air.
 func (w *World) PlaceBlocks(edits []BlockEdit) ([]BlockState, error) {
 	return w.setBlocks(edits, true)
 }
