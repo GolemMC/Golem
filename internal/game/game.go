@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GolemMC/Golem/internal/registry"
 	"github.com/GolemMC/Golem/internal/world"
 )
 
@@ -22,6 +23,8 @@ const (
 	TickInterval       = 50 * time.Millisecond
 	commandCapacity    = 2048
 	loadQueueCapacity  = 512
+	playerIOCapacity   = 512
+	blockIOCapacity    = 256
 	loadCacheLimit     = 512
 	maxPendingLoads    = 16384
 	maxCommandsPerTick = 4096
@@ -31,6 +34,13 @@ type PlayerID [16]byte
 type ChunkPos struct{ X, Z int32 }
 type Vec3 struct{ X, Y, Z float64 }
 type Rotation struct{ Yaw, Pitch float32 }
+type BlockPos struct{ X, Y, Z int32 }
+
+type ItemStack struct {
+	Slot  int8
+	ID    string
+	Count int32
+}
 
 type Property struct {
 	Name      string
@@ -39,13 +49,15 @@ type Property struct {
 }
 
 type Player struct {
-	ID         PlayerID
-	Username   string
-	Properties []Property
-	EntityID   int32
-	Position   Vec3
-	Rotation   Rotation
-	OnGround   bool
+	ID             PlayerID
+	Username       string
+	Properties     []Property
+	EntityID       int32
+	Position       Vec3
+	Rotation       Rotation
+	OnGround       bool
+	SelectedHotbar int32
+	Inventory      []ItemStack
 }
 
 type Event interface{ gameEvent() }
@@ -74,6 +86,13 @@ type ChatBroadcast struct {
 
 func (ChatBroadcast) gameEvent() {}
 
+type BlockChanged struct {
+	Position BlockPos
+	State    world.BlockState
+}
+
+func (BlockChanged) gameEvent() {}
+
 type ChunkLoaded struct {
 	Position ChunkPos
 	Chunk    world.Chunk
@@ -100,10 +119,42 @@ func (Notice) gameEvent() {}
 type JoinPlayer struct {
 	Player Player
 	Events chan Event
+	data   world.PlayerData
 	reply  chan joinReply
 }
 
-type LeavePlayer struct{ PlayerID PlayerID }
+type LeavePlayer struct {
+	PlayerID PlayerID
+	reply    chan leaveReply
+}
+
+type SavePlayers struct{ reply chan []playerSave }
+
+type SaveCompleted struct {
+	PlayerID PlayerID
+	sequence uint64
+}
+
+type SelectHotbar struct {
+	PlayerID PlayerID
+	Slot     int32
+	reply    chan error
+}
+
+type SetCreativeSlot struct {
+	PlayerID PlayerID
+	Slot     int8
+	Item     ItemStack
+	reply    chan error
+}
+
+type ChangeBlock struct {
+	PlayerID PlayerID
+	Position BlockPos
+	State    world.BlockState
+	Place    bool
+	reply    chan BlockEditResult
+}
 
 type MovePlayer struct {
 	PlayerID PlayerID
@@ -131,6 +182,11 @@ type command interface{ gameCommand() }
 
 func (JoinPlayer) gameCommand()      {}
 func (LeavePlayer) gameCommand()     {}
+func (SavePlayers) gameCommand()     {}
+func (SaveCompleted) gameCommand()   {}
+func (SelectHotbar) gameCommand()    {}
+func (SetCreativeSlot) gameCommand() {}
+func (ChangeBlock) gameCommand()     {}
 func (MovePlayer) gameCommand()      {}
 func (SendChat) gameCommand()        {}
 func (SubscribeChunks) gameCommand() {}
@@ -150,10 +206,82 @@ type playerState struct {
 	chatCount   int
 	lastChat    string
 	chatRepeats int
+	data        world.PlayerData
 }
 
 type ChunkSource interface {
 	LoadChunk(chunkX, chunkZ int32) (world.Chunk, error)
+}
+
+type PlayerStore interface {
+	LoadPlayer(id [16]byte) (world.PlayerData, error)
+	SavePlayer(ctx context.Context, id [16]byte, player world.PlayerData) error
+}
+
+type BlockStore interface {
+	GetBlock(x, y, z int32) (world.BlockState, error)
+	SetBlock(x, y, z int32, state world.BlockState) (world.BlockState, error)
+	PlaceBlock(x, y, z int32, state world.BlockState) (world.BlockState, error)
+}
+
+type BlockEditResult struct {
+	Position BlockPos
+	State    world.BlockState
+	Applied  bool
+	Err      error
+}
+
+type blockTask struct {
+	playerID PlayerID
+	position BlockPos
+	state    world.BlockState
+	place    bool
+	readOnly bool
+	rejected error
+	reply    chan BlockEditResult
+}
+
+type blockResult struct {
+	task  blockTask
+	state world.BlockState
+	err   error
+}
+
+type pendingBlockWrite struct {
+	task    blockTask
+	waiters []blockTask
+}
+
+type leaveReply struct {
+	save *playerSave
+	err  error
+}
+
+type playerSave struct {
+	id       PlayerID
+	data     world.PlayerData
+	sequence uint64
+}
+
+type playerIOTask struct {
+	ctx  context.Context
+	load *playerLoadRequest
+	save *playerSaveRequest
+}
+
+type playerLoadRequest struct {
+	id    PlayerID
+	reply chan playerLoadResult
+}
+
+type playerLoadResult struct {
+	data world.PlayerData
+	err  error
+}
+
+type playerSaveRequest struct {
+	snapshot playerSave
+	reply    chan error
 }
 
 type loadTask struct{ position ChunkPos }
@@ -179,40 +307,59 @@ type Snapshot struct {
 }
 
 type Game struct {
-	viewDistance int32
-	workers      int
-	chunks       ChunkSource
-	log          *slog.Logger
-	commands     chan command
-	loadTasks    chan loadTask
-	loadResults  chan loadResult
-	players      map[PlayerID]*playerState
-	nextEntityID int32
-	inflight     map[ChunkPos]struct{}
-	waiting      map[ChunkPos]map[PlayerID]struct{}
-	pending      []ChunkPos
-	cache        map[ChunkPos]world.Chunk
-	cacheOrder   []ChunkPos
-	online       atomic.Int64
-	metricsMu    sync.RWMutex
-	snapshot     Snapshot
-	tickSamples  [100]time.Duration
-	tickNext     int
-	tickCount    int
+	viewDistance     int32
+	workers          int
+	chunks           ChunkSource
+	playerStore      PlayerStore
+	blockStore       BlockStore
+	log              *slog.Logger
+	commands         chan command
+	loadTasks        chan loadTask
+	loadResults      chan loadResult
+	playerIO         chan playerIOTask
+	blockTasks       chan blockTask
+	blockResults     chan blockResult
+	players          map[PlayerID]*playerState
+	nextEntityID     int32
+	inflight         map[ChunkPos]struct{}
+	waiting          map[ChunkPos]map[PlayerID]struct{}
+	pending          []ChunkPos
+	cache            map[ChunkPos]world.Chunk
+	cacheOrder       []ChunkPos
+	pendingSaves     map[PlayerID]playerSave
+	nextSaveSequence uint64
+	playerLocks      [64]sync.Mutex
+	persistMu        sync.Mutex
+	lastPersisted    map[PlayerID]uint64
+	pendingBlocks    map[ChunkPos]*pendingBlockWrite
+	online           atomic.Int64
+	metricsMu        sync.RWMutex
+	snapshot         Snapshot
+	tickSamples      [100]time.Duration
+	tickNext         int
+	tickCount        int
 }
 
-func New(viewDistance, workers int, chunks ChunkSource, log *slog.Logger) *Game {
+func New(viewDistance, workers int, chunks ChunkSource, players PlayerStore, blocks BlockStore, log *slog.Logger) *Game {
 	return &Game{
-		viewDistance: int32(viewDistance), workers: workers, chunks: chunks, log: log,
+		viewDistance: int32(viewDistance), workers: workers, chunks: chunks, playerStore: players, blockStore: blocks, log: log,
 		commands: make(chan command, commandCapacity), loadTasks: make(chan loadTask, loadQueueCapacity),
-		loadResults: make(chan loadResult, loadQueueCapacity), players: make(map[PlayerID]*playerState),
+		loadResults: make(chan loadResult, loadQueueCapacity), playerIO: make(chan playerIOTask, playerIOCapacity),
+		blockTasks: make(chan blockTask, blockIOCapacity), blockResults: make(chan blockResult, blockIOCapacity), players: make(map[PlayerID]*playerState),
 		inflight: make(map[ChunkPos]struct{}), waiting: make(map[ChunkPos]map[PlayerID]struct{}), cache: make(map[ChunkPos]world.Chunk),
+		pendingSaves: make(map[PlayerID]playerSave), lastPersisted: make(map[PlayerID]uint64), pendingBlocks: make(map[ChunkPos]*pendingBlockWrite),
 	}
 }
 
 func (g *Game) Run(ctx context.Context) {
 	for i := 0; i < g.workers; i++ {
 		go g.chunkWorker(ctx)
+		if g.playerStore != nil {
+			go g.playerWorker(ctx)
+		}
+		if g.blockStore != nil {
+			go g.blockWorker(ctx)
+		}
 	}
 	ticker := time.NewTicker(TickInterval)
 	defer ticker.Stop()
@@ -245,6 +392,14 @@ func (g *Game) processTick() {
 			i = loadQueueCapacity
 		}
 	}
+	for i := 0; i < blockIOCapacity; i++ {
+		select {
+		case result := <-g.blockResults:
+			g.handleBlockResult(result)
+		default:
+			i = blockIOCapacity
+		}
+	}
 	for len(g.pending) > 0 {
 		task := loadTask{position: g.pending[0]}
 		select {
@@ -275,9 +430,150 @@ func (g *Game) chunkWorker(ctx context.Context) {
 	}
 }
 
+func (g *Game) blockWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task := <-g.blockTasks:
+			var state world.BlockState
+			var err error
+			if task.readOnly {
+				state, err = g.blockStore.GetBlock(task.position.X, task.position.Y, task.position.Z)
+				if err == nil {
+					err = task.rejected
+				}
+			} else if task.place {
+				_, err = g.blockStore.PlaceBlock(task.position.X, task.position.Y, task.position.Z, task.state)
+			} else {
+				_, err = g.blockStore.SetBlock(task.position.X, task.position.Y, task.position.Z, task.state)
+			}
+			if err == nil {
+				state = task.state
+			} else {
+				state, _ = g.blockStore.GetBlock(task.position.X, task.position.Y, task.position.Z)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case g.blockResults <- blockResult{task: task, state: state, err: err}:
+			}
+		}
+	}
+}
+
+func (g *Game) playerWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task := <-g.playerIO:
+			if task.load != nil {
+				g.runPlayerLoad(task.ctx, task.load)
+			}
+			if task.save != nil {
+				g.runPlayerSave(task.ctx, task.save)
+			}
+		}
+	}
+}
+
+func (g *Game) runPlayerLoad(ctx context.Context, request *playerLoadRequest) {
+	result := playerLoadResult{}
+	if err := ctx.Err(); err != nil {
+		result.err = err
+	} else {
+		lock := &g.playerLocks[int(request.id[0])%len(g.playerLocks)]
+		lock.Lock()
+		result.data, result.err = g.playerStore.LoadPlayer([16]byte(request.id))
+		lock.Unlock()
+	}
+	request.reply <- result
+}
+
+func (g *Game) runPlayerSave(ctx context.Context, request *playerSaveRequest) {
+	if err := ctx.Err(); err != nil {
+		request.reply <- err
+		return
+	}
+	snapshot := request.snapshot
+	lock := &g.playerLocks[int(snapshot.id[0])%len(g.playerLocks)]
+	lock.Lock()
+	defer lock.Unlock()
+	g.persistMu.Lock()
+	last := g.lastPersisted[snapshot.id]
+	g.persistMu.Unlock()
+	if snapshot.sequence <= last {
+		request.reply <- nil
+		return
+	}
+	err := g.playerStore.SavePlayer(ctx, [16]byte(snapshot.id), snapshot.data)
+	if err == nil {
+		g.persistMu.Lock()
+		if snapshot.sequence > g.lastPersisted[snapshot.id] {
+			g.lastPersisted[snapshot.id] = snapshot.sequence
+		}
+		g.persistMu.Unlock()
+	}
+	request.reply <- err
+}
+
+func (g *Game) loadPlayer(ctx context.Context, id PlayerID) (world.PlayerData, error) {
+	if g.playerStore == nil {
+		return world.PlayerData{Raw: make(map[string]any)}, nil
+	}
+	reply := make(chan playerLoadResult, 1)
+	task := playerIOTask{ctx: ctx, load: &playerLoadRequest{id: id, reply: reply}}
+	select {
+	case <-ctx.Done():
+		return world.PlayerData{}, ctx.Err()
+	case g.playerIO <- task:
+	}
+	select {
+	case <-ctx.Done():
+		return world.PlayerData{}, ctx.Err()
+	case result := <-reply:
+		return result.data, result.err
+	}
+}
+
+func (g *Game) persistPlayer(ctx context.Context, snapshot playerSave) error {
+	if g.playerStore == nil {
+		return nil
+	}
+	reply := make(chan error, 1)
+	task := playerIOTask{ctx: ctx, save: &playerSaveRequest{snapshot: snapshot, reply: reply}}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case g.playerIO <- task:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-reply:
+		return err
+	}
+}
+
 func (g *Game) Join(ctx context.Context, player Player, events chan Event) (Player, []Player, error) {
+	data, err := g.loadPlayer(ctx, player.ID)
+	if err != nil {
+		return Player{}, nil, fmt.Errorf("load player %s: %w", player.ID, err)
+	}
+	if data.Exists {
+		position := Vec3{X: data.Position[0], Y: data.Position[1], Z: data.Position[2]}
+		rotation := Rotation{Yaw: data.Rotation[0], Pitch: data.Rotation[1]}
+		if !validPosition(position) || !validRotation(rotation) {
+			return Player{}, nil, errors.New("saved player position or rotation is invalid")
+		}
+		player.Position = position
+		player.Rotation = rotation
+		player.SelectedHotbar = data.SelectedHotbar
+	}
+	player.Inventory = inventoryFromWorld(data.Inventory)
 	reply := make(chan joinReply, 1)
-	request := JoinPlayer{Player: player, Events: events, reply: reply}
+	request := JoinPlayer{Player: player, Events: events, data: data, reply: reply}
 	if err := g.submit(ctx, request); err != nil {
 		return Player{}, nil, err
 	}
@@ -290,7 +586,96 @@ func (g *Game) Join(ctx context.Context, player Player, events chan Event) (Play
 }
 
 func (g *Game) Leave(ctx context.Context, id PlayerID) error {
-	return g.submit(ctx, LeavePlayer{PlayerID: id})
+	reply := make(chan leaveReply, 1)
+	if err := g.submit(ctx, LeavePlayer{PlayerID: id, reply: reply}); err != nil {
+		return err
+	}
+	var result leaveReply
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result = <-reply:
+	}
+	if result.err != nil || result.save == nil {
+		return result.err
+	}
+	if err := g.persistPlayer(ctx, *result.save); err != nil {
+		return err
+	}
+	return g.submit(ctx, SaveCompleted{PlayerID: id, sequence: result.save.sequence})
+}
+
+func (g *Game) Save(ctx context.Context) error {
+	if g.playerStore == nil {
+		return nil
+	}
+	reply := make(chan []playerSave, 1)
+	if err := g.submit(ctx, SavePlayers{reply: reply}); err != nil {
+		return err
+	}
+	var snapshots []playerSave
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case snapshots = <-reply:
+	}
+	for _, snapshot := range snapshots {
+		if err := g.persistPlayer(ctx, snapshot); err != nil {
+			return fmt.Errorf("save player %s: %w", snapshot.id, err)
+		}
+		if err := g.submit(ctx, SaveCompleted{PlayerID: snapshot.id, sequence: snapshot.sequence}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *Game) SelectHotbar(ctx context.Context, id PlayerID, slot int32) error {
+	reply := make(chan error, 1)
+	if err := g.submit(ctx, SelectHotbar{PlayerID: id, Slot: slot, reply: reply}); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-reply:
+		return err
+	}
+}
+
+func (g *Game) SetCreativeInventorySlot(ctx context.Context, id PlayerID, slot int8, item ItemStack) error {
+	reply := make(chan error, 1)
+	item.Slot = slot
+	if err := g.submit(ctx, SetCreativeSlot{PlayerID: id, Slot: slot, Item: item, reply: reply}); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-reply:
+		return err
+	}
+}
+
+func (g *Game) BreakBlock(ctx context.Context, id PlayerID, position BlockPos) (BlockEditResult, error) {
+	return g.changeBlock(ctx, ChangeBlock{PlayerID: id, Position: position, State: world.BlockState{Name: "minecraft:air"}})
+}
+
+func (g *Game) PlaceBlock(ctx context.Context, id PlayerID, position BlockPos) (BlockEditResult, error) {
+	return g.changeBlock(ctx, ChangeBlock{PlayerID: id, Position: position, Place: true})
+}
+
+func (g *Game) changeBlock(ctx context.Context, change ChangeBlock) (BlockEditResult, error) {
+	change.reply = make(chan BlockEditResult, 1)
+	if err := g.submit(ctx, change); err != nil {
+		return BlockEditResult{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return BlockEditResult{}, ctx.Err()
+	case result := <-change.reply:
+		return result, nil
+	}
 }
 
 func (g *Game) Move(ctx context.Context, move MovePlayer) error {
@@ -344,7 +729,31 @@ func (g *Game) handle(raw command) {
 	case JoinPlayer:
 		g.handleJoin(cmd)
 	case LeavePlayer:
-		g.handleLeave(cmd.PlayerID)
+		snapshot := g.handleLeave(cmd.PlayerID)
+		if cmd.reply != nil {
+			cmd.reply <- leaveReply{save: snapshot}
+		}
+	case SavePlayers:
+		cmd.reply <- g.playerSnapshots()
+	case SaveCompleted:
+		if pending, exists := g.pendingSaves[cmd.PlayerID]; exists && pending.sequence <= cmd.sequence {
+			delete(g.pendingSaves, cmd.PlayerID)
+		}
+	case SelectHotbar:
+		player := g.players[cmd.PlayerID]
+		if player == nil {
+			cmd.reply <- errors.New("player is not active")
+		} else if cmd.Slot < 0 || cmd.Slot > 8 {
+			cmd.reply <- errors.New("hotbar slot is outside 0..8")
+		} else {
+			player.player.SelectedHotbar = cmd.Slot
+			player.data.SelectedHotbar = cmd.Slot
+			cmd.reply <- nil
+		}
+	case SetCreativeSlot:
+		g.handleCreativeSlot(cmd)
+	case ChangeBlock:
+		g.handleChangeBlock(cmd)
 	case MovePlayer:
 		g.handleMove(cmd)
 	case SendChat:
@@ -352,6 +761,104 @@ func (g *Game) handle(raw command) {
 	case SubscribeChunks:
 		if player := g.players[cmd.PlayerID]; player != nil {
 			g.updateSubscriptions(player, cmd.Center)
+		}
+	}
+}
+
+func (g *Game) handleCreativeSlot(cmd SetCreativeSlot) {
+	player := g.players[cmd.PlayerID]
+	if player == nil {
+		cmd.reply <- errors.New("player is not active")
+		return
+	}
+	if !validInventorySlot(cmd.Slot) {
+		cmd.reply <- fmt.Errorf("inventory slot %d is not editable", cmd.Slot)
+		return
+	}
+	if cmd.Item.Count < 0 || cmd.Item.Count > 99 || cmd.Item.Count > 0 && cmd.Item.ID == "" {
+		cmd.reply <- errors.New("creative item stack is invalid")
+		return
+	}
+	player.data.Inventory = setWorldInventoryItem(player.data.Inventory, cmd.Slot, cmd.Item)
+	player.player.Inventory = inventoryFromWorld(player.data.Inventory)
+	cmd.reply <- nil
+}
+
+func (g *Game) handleChangeBlock(cmd ChangeBlock) {
+	player := g.players[cmd.PlayerID]
+	if player == nil {
+		cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("player is not active")}
+		return
+	}
+	if g.blockStore == nil {
+		cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("block persistence is unavailable")}
+		return
+	}
+	if !validBlockReach(player.player.Position, cmd.Position) {
+		cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("block is outside interaction range")}
+		return
+	}
+	if cmd.Place {
+		item, exists := selectedItem(player.player)
+		if !exists {
+			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("selected hotbar slot is empty")}
+			return
+		}
+		definition, err := registry.DefaultBlockState(item.ID)
+		if err != nil {
+			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: fmt.Errorf("selected item cannot be placed: %w", err)}
+			return
+		}
+		// Blocks with state properties need contextual placement rules (facing,
+		// multipart neighbors, waterlogging, and similar). Refuse those until the
+		// rules exist instead of writing an invalid approximation to the world.
+		if len(definition.Properties) != 0 {
+			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("selected block needs unsupported placement rules")}
+			return
+		}
+		cmd.State = world.BlockState{Name: definition.Name, Properties: definition.Properties}
+	}
+	chunk := ChunkPos{X: cmd.Position.X >> 4, Z: cmd.Position.Z >> 4}
+	if pending := g.pendingBlocks[chunk]; pending != nil {
+		rejected := errors.New("chunk already has a pending block write")
+		resync := blockTask{playerID: cmd.PlayerID, position: cmd.Position, readOnly: true, rejected: rejected, reply: cmd.reply}
+		if cmd.Position == pending.task.position {
+			pending.waiters = append(pending.waiters, resync)
+			return
+		}
+		select {
+		case g.blockTasks <- resync:
+		default:
+			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: fmt.Errorf("%w; block read queue is full", rejected)}
+		}
+		return
+	}
+	task := blockTask{playerID: cmd.PlayerID, position: cmd.Position, state: cmd.State, place: cmd.Place, reply: cmd.reply}
+	select {
+	case g.blockTasks <- task:
+		g.pendingBlocks[chunk] = &pendingBlockWrite{task: task}
+	default:
+		cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("block write queue is full")}
+	}
+}
+
+func (g *Game) handleBlockResult(result blockResult) {
+	if result.task.readOnly {
+		result.task.reply <- BlockEditResult{Position: result.task.position, State: result.state, Err: result.err}
+		return
+	}
+	chunk := ChunkPos{X: result.task.position.X >> 4, Z: result.task.position.Z >> 4}
+	pending := g.pendingBlocks[chunk]
+	delete(g.pendingBlocks, chunk)
+	edit := BlockEditResult{Position: result.task.position, State: result.state, Applied: result.err == nil, Err: result.err}
+	if result.err == nil {
+		g.invalidateChunk(chunk)
+		g.broadcast(BlockChanged{Position: result.task.position, State: result.state}, result.task.playerID)
+	}
+	result.task.reply <- edit
+	if pending != nil {
+		for _, waiter := range pending.waiters {
+			waiter.reply <- BlockEditResult{Position: waiter.position, State: result.state, Err: waiter.rejected}
 		}
 	}
 }
@@ -372,7 +879,7 @@ func (g *Game) handleJoin(cmd JoinPlayer) {
 		existing = append(existing, clonePlayer(other.player))
 	}
 	sort.Slice(existing, func(i, j int) bool { return existing[i].EntityID < existing[j].EntityID })
-	state := &playerState{player: clonePlayer(cmd.Player), events: cmd.Events, subscribed: make(map[ChunkPos]struct{})}
+	state := &playerState{player: clonePlayer(cmd.Player), events: cmd.Events, subscribed: make(map[ChunkPos]struct{}), data: cmd.data}
 	g.players[cmd.Player.ID] = state
 	g.online.Add(1)
 	g.broadcast(PlayerJoined{Player: clonePlayer(cmd.Player)}, cmd.Player.ID)
@@ -385,11 +892,17 @@ func (g *Game) handleJoin(cmd JoinPlayer) {
 	cmd.reply <- joinReply{self: clonePlayer(cmd.Player), existing: existing}
 }
 
-func (g *Game) handleLeave(id PlayerID) {
+func (g *Game) handleLeave(id PlayerID) *playerSave {
 	state := g.players[id]
 	if state == nil {
-		return
+		if pending, exists := g.pendingSaves[id]; exists {
+			copy := pending
+			return &copy
+		}
+		return nil
 	}
+	snapshot := g.newPlayerSave(state)
+	g.pendingSaves[id] = snapshot
 	delete(g.players, id)
 	g.online.Add(-1)
 	for position := range state.subscribed {
@@ -399,6 +912,38 @@ func (g *Game) handleLeave(id PlayerID) {
 	}
 	g.broadcast(PlayerLeft{Player: clonePlayer(state.player)}, id)
 	close(state.events)
+	return &snapshot
+}
+
+func (g *Game) playerSnapshots() []playerSave {
+	ids := make([]PlayerID, 0, len(g.pendingSaves)+len(g.players))
+	for id := range g.pendingSaves {
+		ids = append(ids, id)
+	}
+	for id := range g.players {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	snapshots := make([]playerSave, 0, len(ids))
+	for _, id := range ids {
+		if pending, exists := g.pendingSaves[id]; exists {
+			snapshots = append(snapshots, pending)
+			continue
+		}
+		if state := g.players[id]; state != nil {
+			snapshots = append(snapshots, g.newPlayerSave(state))
+		}
+	}
+	return snapshots
+}
+
+func (g *Game) newPlayerSave(state *playerState) playerSave {
+	g.nextSaveSequence++
+	data := state.data
+	data.Position = [3]float64{state.player.Position.X, state.player.Position.Y, state.player.Position.Z}
+	data.Rotation = [2]float32{state.player.Rotation.Yaw, state.player.Rotation.Pitch}
+	data.SelectedHotbar = state.player.SelectedHotbar
+	return playerSave{id: state.player.ID, data: data, sequence: g.nextSaveSequence}
 }
 
 func (g *Game) handleMove(cmd MovePlayer) {
@@ -590,6 +1135,16 @@ func (g *Game) cacheChunk(position ChunkPos, chunk world.Chunk) {
 	g.cacheOrder = append(g.cacheOrder, position)
 }
 
+func (g *Game) invalidateChunk(position ChunkPos) {
+	delete(g.cache, position)
+	for index, cached := range g.cacheOrder {
+		if cached == position {
+			g.cacheOrder = append(g.cacheOrder[:index], g.cacheOrder[index+1:]...)
+			break
+		}
+	}
+}
+
 func (g *Game) emit(player *playerState, event Event) bool {
 	select {
 	case player.events <- event:
@@ -666,8 +1221,55 @@ func validRotation(rotation Rotation) bool {
 		!math.IsNaN(float64(rotation.Pitch)) && !math.IsInf(float64(rotation.Pitch), 0)
 }
 
+func validBlockReach(position Vec3, block BlockPos) bool {
+	if block.Y < -64 || block.Y > 319 {
+		return false
+	}
+	dx := float64(block.X) + 0.5 - position.X
+	dy := float64(block.Y) + 0.5 - (position.Y + 1.62)
+	dz := float64(block.Z) + 0.5 - position.Z
+	return dx*dx+dy*dy+dz*dz <= 64
+}
+
+func validInventorySlot(slot int8) bool {
+	return slot >= 0 && slot <= 35 || slot >= 100 && slot <= 103 || slot == -106
+}
+
+func selectedItem(player Player) (ItemStack, bool) {
+	for _, item := range player.Inventory {
+		if item.Slot == int8(player.SelectedHotbar) && item.Count > 0 {
+			return item, true
+		}
+	}
+	return ItemStack{}, false
+}
+
+func inventoryFromWorld(items []world.InventoryItem) []ItemStack {
+	result := make([]ItemStack, 0, len(items))
+	for _, item := range items {
+		result = append(result, ItemStack{Slot: item.Slot, ID: item.ID, Count: item.Count})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Slot < result[j].Slot })
+	return result
+}
+
+func setWorldInventoryItem(items []world.InventoryItem, slot int8, item ItemStack) []world.InventoryItem {
+	result := make([]world.InventoryItem, 0, len(items)+1)
+	for _, existing := range items {
+		if existing.Slot != slot {
+			result = append(result, existing)
+		}
+	}
+	if item.Count > 0 {
+		result = append(result, world.InventoryItem{Slot: slot, ID: item.ID, Count: item.Count})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Slot < result[j].Slot })
+	return result
+}
+
 func clonePlayer(player Player) Player {
 	player.Properties = append([]Property(nil), player.Properties...)
+	player.Inventory = append([]ItemStack(nil), player.Inventory...)
 	return player
 }
 

@@ -93,6 +93,31 @@ func TestSetBlocksCommitsBothStatesInOneChunkRewrite(t *testing.T) {
 	}
 }
 
+func TestPlaceBlockRequiresAirAndLeavesOccupiedTargetUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	root := map[string]any{
+		"DataVersion": int32(version.WorldDataVersion), "xPos": int32(0), "zPos": int32(0),
+		"sections": []any{map[string]any{
+			"Y":            int8(4),
+			"block_states": map[string]any{"palette": []any{map[string]any{"Name": "minecraft:stone"}}},
+			"biomes":       map[string]any{"palette": []any{"minecraft:plains"}},
+		}},
+	}
+	encoded, err := nbt.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestRegion(t, dir, encoded)
+	w := &World{Path: dir, regions: region.NewStore()}
+	if _, err := w.PlaceBlock(1, 64, 1, BlockState{Name: "minecraft:dirt"}); err == nil {
+		t.Fatal("placement replaced an occupied block")
+	}
+	got, err := w.GetBlock(1, 64, 1)
+	if err != nil || got.Name != "minecraft:stone" {
+		t.Fatalf("occupied target changed: state=%+v err=%v", got, err)
+	}
+}
+
 func TestSetBlocksValidationLeavesRegionUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	root := map[string]any{
@@ -116,7 +141,7 @@ func TestSetBlocksValidationLeavesRegionUnchanged(t *testing.T) {
 	w := &World{Path: dir, regions: region.NewStore()}
 	_, err = w.SetBlocks([]BlockEdit{
 		{X: 1, Y: 1, Z: 1, State: BlockState{Name: "minecraft:air"}},
-		{X: 1, Y: 16, Z: 1, State: BlockState{Name: "minecraft:air"}}, // missing section
+		{X: 1, Y: 16, Z: 1, State: BlockState{Name: "minecraft:air"}},
 	})
 	if err == nil {
 		t.Fatal("atomic edit with an invalid second block was accepted")
@@ -193,8 +218,4 @@ func readRawChunk(t *testing.T, dir string) map[string]any {
 		t.Fatal(err)
 	}
 	return root
-}
-
-func isAirBlock(state BlockState) bool {
-	return state.Name == "minecraft:air" || state.Name == "minecraft:cave_air" || state.Name == "minecraft:void_air"
 }

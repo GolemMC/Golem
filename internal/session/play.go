@@ -15,6 +15,7 @@ import (
 	"github.com/GolemMC/Golem/internal/game"
 	"github.com/GolemMC/Golem/internal/protocol"
 	"github.com/GolemMC/Golem/internal/registry"
+	"github.com/GolemMC/Golem/internal/world"
 )
 
 const (
@@ -129,7 +130,9 @@ func (s *Server) configureAndPlay(ctx context.Context, connection net.Conn, code
 	}
 	defer func() {
 		leaveContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = s.game.Leave(leaveContext, self.ID)
+		if leaveErr := s.game.Leave(leaveContext, self.ID); leaveErr != nil {
+			s.log.Error("player save on disconnect failed", "username", identity.Username, "uuid", auth.FormatUUID(identity.UUID), "error", leaveErr)
+		}
 		cancel()
 	}()
 	stage = "initial play data"
@@ -247,13 +250,20 @@ func (s *Server) sendInitialPlay(connection net.Conn, codec protocol.FrameCodec,
 		return err
 	}
 	var abilities protocol.Encoder
-	abilities.WriteByte(0x0f)
+	abilities.WriteByte(0x0d)
 	abilities.Float32(0.05)
 	abilities.Float32(0.1)
 	if err := codec.Write(connection, protocol.PlayClientboundAbilities, abilities.Bytes()); err != nil {
 		return err
 	}
-	if err := codec.Write(connection, protocol.PlayClientboundHeldItem, []byte{0}); err != nil {
+	if err := codec.Write(connection, protocol.PlayClientboundHeldItem, []byte{byte(self.SelectedHotbar)}); err != nil {
+		return err
+	}
+	inventory, err := inventoryContentPayload(self)
+	if err != nil {
+		return err
+	}
+	if err := codec.Write(connection, protocol.PlayClientboundInventoryContent, inventory); err != nil {
 		return err
 	}
 	var distance protocol.Encoder
@@ -298,6 +308,65 @@ func (s *Server) sendInitialPlay(connection net.Conn, codec protocol.FrameCodec,
 		return err
 	}
 	return codec.Write(connection, protocol.PlayClientboundSystemChat, message)
+}
+
+func inventoryContentPayload(player game.Player) ([]byte, error) {
+	items := make([]*game.ItemStack, 46)
+	for index := range player.Inventory {
+		item := player.Inventory[index]
+		networkSlot, ok := inventoryNetworkSlot(item.Slot)
+		if ok {
+			copy := item
+			items[networkSlot] = &copy
+		}
+	}
+	var encoded protocol.Encoder
+	encoded.WriteByte(0)
+	encoded.VarInt(0)
+	encoded.VarInt(int32(len(items)))
+	for _, item := range items {
+		if err := encodeItemSlot(&encoded, item); err != nil {
+			return nil, err
+		}
+	}
+	if err := encodeItemSlot(&encoded, nil); err != nil {
+		return nil, err
+	}
+	return encoded.Bytes(), nil
+}
+
+func inventoryNetworkSlot(slot int8) (int, bool) {
+	switch {
+	case slot >= 0 && slot <= 8:
+		return int(slot) + 36, true
+	case slot >= 9 && slot <= 35:
+		return int(slot), true
+	case slot >= 100 && slot <= 103:
+		return 108 - int(slot), true
+	case slot == -106:
+		return 45, true
+	default:
+		return 0, false
+	}
+}
+
+func encodeItemSlot(encoded *protocol.Encoder, item *game.ItemStack) error {
+	if item == nil || item.Count == 0 {
+		encoded.VarInt(0)
+		return nil
+	}
+	definition, exists, err := registry.ItemByName(item.ID)
+	if err != nil {
+		return err
+	}
+	if !exists || item.Count < 0 || item.Count > 99 {
+		return fmt.Errorf("invalid persisted inventory item %q", item.ID)
+	}
+	encoded.VarInt(item.Count)
+	encoded.VarInt(definition.ID)
+	encoded.VarInt(0)
+	encoded.VarInt(0)
+	return nil
 }
 
 func newPlayerSession(parent context.Context, server *Server, identity auth.Identity, self game.Player, connection net.Conn, codec protocol.FrameCodec, events chan game.Event) *playerSession {
@@ -379,6 +448,12 @@ func (p *playerSession) sendEvent(event game.Event) error {
 		return p.sendMovement(value)
 	case game.ChatBroadcast:
 		return p.sendSystem("<" + value.Sender.Username + "> " + value.Message)
+	case game.BlockChanged:
+		payload, err := blockUpdatePayload(value.Position, value.State)
+		if err != nil {
+			return err
+		}
+		return p.send(protocol.PlayClientboundBlockUpdate, payload)
 	case game.Notice:
 		return p.sendSystem(value.Message)
 	case game.ViewCenterChanged:
@@ -572,6 +647,61 @@ func (s *Server) playLoop(ctx context.Context, player *playerSession) error {
 			if err := s.game.Move(ctx, game.MovePlayer{PlayerID: player.playerID, OnGround: onGround}); err != nil {
 				return err
 			}
+		case protocol.PlayServerboundPlayerAction:
+			action, position, sequence, err := decodePlayerAction(payload)
+			if err != nil {
+				return err
+			}
+			if action == 0 {
+				result, err := s.game.BreakBlock(ctx, player.playerID, position)
+				if err != nil {
+					return err
+				}
+				if err := s.finishBlockInteraction(player, result, sequence); err != nil {
+					return err
+				}
+			} else if action == 1 || action == 2 {
+				if err := player.sendSync(protocol.PlayClientboundBlockChangedAck, blockChangedAckPayload(sequence)); err != nil {
+					return err
+				}
+			}
+		case protocol.PlayServerboundHeldItem:
+			decoder := protocol.NewDecoder(payload)
+			slot, err := decoder.Int16()
+			if err != nil || decoder.Remaining() != 0 {
+				return errors.New("invalid held-item selection")
+			}
+			if err := s.game.SelectHotbar(ctx, player.playerID, int32(slot)); err != nil {
+				return err
+			}
+		case protocol.PlayServerboundCreativeSlot:
+			slot, item, err := decodeCreativeSlot(payload)
+			if err != nil {
+				return err
+			}
+			if slot >= 0 {
+				if err := s.game.SetCreativeInventorySlot(ctx, player.playerID, slot, item); err != nil {
+					return err
+				}
+			}
+		case protocol.PlayServerboundUseItemOn:
+			position, sequence, mainHand, err := decodeUseItemOn(payload)
+			if err != nil {
+				return err
+			}
+			if !mainHand {
+				if err := player.sendSync(protocol.PlayClientboundBlockChangedAck, blockChangedAckPayload(sequence)); err != nil {
+					return err
+				}
+				continue
+			}
+			result, err := s.game.PlaceBlock(ctx, player.playerID, position)
+			if err != nil {
+				return err
+			}
+			if err := s.finishBlockInteraction(player, result, sequence); err != nil {
+				return err
+			}
 		case protocol.PlayServerboundChatMessage:
 			message, err := decodeChatMessage(payload, s.cfg.Network.MaxChatLength)
 			if err != nil {
@@ -592,6 +722,157 @@ func (s *Server) playLoop(ctx context.Context, player *playerSession) error {
 			}
 		}
 	}
+}
+
+func decodePlayerAction(payload []byte) (int32, game.BlockPos, int32, error) {
+	decoder := protocol.NewDecoder(payload)
+	action, err := decoder.VarInt()
+	if err != nil || action < 0 || action > 6 {
+		return 0, game.BlockPos{}, 0, errors.New("invalid player action")
+	}
+	x, y, z, err := decoder.Position()
+	if err != nil {
+		return 0, game.BlockPos{}, 0, err
+	}
+	face, err := decoder.Byte()
+	if err != nil || face > 5 {
+		return 0, game.BlockPos{}, 0, errors.New("invalid block-action face")
+	}
+	sequence, err := decoder.VarInt()
+	if err != nil || sequence < 0 || decoder.Remaining() != 0 {
+		return 0, game.BlockPos{}, 0, errors.New("invalid block-action sequence")
+	}
+	return action, game.BlockPos{X: x, Y: y, Z: z}, sequence, nil
+}
+
+func decodeUseItemOn(payload []byte) (game.BlockPos, int32, bool, error) {
+	decoder := protocol.NewDecoder(payload)
+	hand, err := decoder.VarInt()
+	if err != nil || hand < 0 || hand > 1 {
+		return game.BlockPos{}, 0, false, errors.New("invalid interaction hand")
+	}
+	x, y, z, err := decoder.Position()
+	if err != nil {
+		return game.BlockPos{}, 0, false, err
+	}
+	face, err := decoder.VarInt()
+	if err != nil || face < 0 || face > 5 {
+		return game.BlockPos{}, 0, false, errors.New("invalid placement face")
+	}
+	for range 3 {
+		cursor, err := decoder.Float32()
+		if err != nil || math.IsNaN(float64(cursor)) || math.IsInf(float64(cursor), 0) || cursor < 0 || cursor > 1 {
+			return game.BlockPos{}, 0, false, errors.New("invalid placement cursor")
+		}
+	}
+	if _, err := decoder.Bool(); err != nil {
+		return game.BlockPos{}, 0, false, err
+	}
+	sequence, err := decoder.VarInt()
+	if err != nil || sequence < 0 || decoder.Remaining() != 0 {
+		return game.BlockPos{}, 0, false, errors.New("invalid placement sequence")
+	}
+	offsets := [...]game.BlockPos{{Y: -1}, {Y: 1}, {Z: -1}, {Z: 1}, {X: -1}, {X: 1}}
+	offset := offsets[face]
+	return game.BlockPos{X: x + offset.X, Y: y + offset.Y, Z: z + offset.Z}, sequence, hand == 0, nil
+}
+
+func decodeCreativeSlot(payload []byte) (int8, game.ItemStack, error) {
+	decoder := protocol.NewDecoder(payload)
+	networkSlot, err := decoder.Int16()
+	if err != nil {
+		return 0, game.ItemStack{}, err
+	}
+	slot, keep, err := playerInventorySlot(networkSlot)
+	if err != nil {
+		return 0, game.ItemStack{}, err
+	}
+	count, err := decoder.VarInt()
+	if err != nil || count < 0 || count > 99 {
+		return 0, game.ItemStack{}, errors.New("invalid creative item count")
+	}
+	if count == 0 {
+		if decoder.Remaining() != 0 {
+			return 0, game.ItemStack{}, errors.New("empty creative slot has trailing data")
+		}
+		if !keep {
+			return -1, game.ItemStack{}, nil
+		}
+		return slot, game.ItemStack{Slot: slot}, nil
+	}
+	itemID, err := decoder.VarInt()
+	if err != nil || itemID < 0 {
+		return 0, game.ItemStack{}, errors.New("invalid creative item ID")
+	}
+	added, err := decoder.VarInt()
+	if err != nil || added < 0 || added > 128 {
+		return 0, game.ItemStack{}, errors.New("invalid added-component count")
+	}
+	removed, err := decoder.VarInt()
+	if err != nil || removed < 0 || removed > 128 {
+		return 0, game.ItemStack{}, errors.New("invalid removed-component count")
+	}
+	if added != 0 || removed != 0 || decoder.Remaining() != 0 {
+		return 0, game.ItemStack{}, errors.New("creative item components are not supported")
+	}
+	item, exists, err := registry.ItemByID(itemID)
+	if err != nil || !exists || count > item.StackSize {
+		return 0, game.ItemStack{}, errors.New("unknown or oversized creative item")
+	}
+	if !keep {
+		return -1, game.ItemStack{}, nil
+	}
+	return slot, game.ItemStack{Slot: slot, ID: "minecraft:" + item.Name, Count: count}, nil
+}
+
+func playerInventorySlot(networkSlot int16) (int8, bool, error) {
+	switch {
+	case networkSlot == -1:
+		return -1, false, nil
+	case networkSlot >= 9 && networkSlot <= 35:
+		return int8(networkSlot), true, nil
+	case networkSlot >= 36 && networkSlot <= 44:
+		return int8(networkSlot - 36), true, nil
+	case networkSlot >= 5 && networkSlot <= 8:
+		return int8(108 - networkSlot), true, nil
+	case networkSlot == 45:
+		return -106, true, nil
+	default:
+		return 0, false, fmt.Errorf("creative inventory slot %d is unsupported", networkSlot)
+	}
+}
+
+func (s *Server) finishBlockInteraction(player *playerSession, result game.BlockEditResult, sequence int32) error {
+	if result.State.Name != "" {
+		payload, err := blockUpdatePayload(result.Position, result.State)
+		if err != nil {
+			return err
+		}
+		if err := player.sendSync(protocol.PlayClientboundBlockUpdate, payload); err != nil {
+			return err
+		}
+	}
+	if result.Err != nil {
+		s.log.Warn("block interaction rejected", "username", player.identity.Username, "x", result.Position.X, "y", result.Position.Y, "z", result.Position.Z, "error", result.Err)
+	}
+	return player.sendSync(protocol.PlayClientboundBlockChangedAck, blockChangedAckPayload(sequence))
+}
+
+func blockChangedAckPayload(sequence int32) []byte {
+	var encoded protocol.Encoder
+	encoded.VarInt(sequence)
+	return encoded.Bytes()
+}
+
+func blockUpdatePayload(position game.BlockPos, state world.BlockState) ([]byte, error) {
+	id, err := registry.BlockStateID(state.Name, state.Properties)
+	if err != nil {
+		return nil, err
+	}
+	var encoded protocol.Encoder
+	encoded.Position(position.X, position.Y, position.Z)
+	encoded.VarInt(id)
+	return encoded.Bytes(), nil
 }
 
 func decodeChatMessage(payload []byte, maxLength int) (string, error) {

@@ -53,6 +53,19 @@ func (w *World) SetBlock(x, y, z int32, state BlockState) (BlockState, error) {
 // existing chunk and every edit validates. The live region is replaced once,
 // so a crash cannot publish only one half of a door or tall plant.
 func (w *World) SetBlocks(edits []BlockEdit) ([]BlockState, error) {
+	return w.setBlocks(edits, false)
+}
+
+// PlaceBlock changes one block only when the target is currently air.
+func (w *World) PlaceBlock(x, y, z int32, state BlockState) (BlockState, error) {
+	old, err := w.setBlocks([]BlockEdit{{X: x, Y: y, Z: z, State: state}}, true)
+	if err != nil {
+		return BlockState{}, err
+	}
+	return old[0], nil
+}
+
+func (w *World) setBlocks(edits []BlockEdit, requireAir bool) ([]BlockState, error) {
 	if len(edits) == 0 || len(edits) > maxAtomicBlockEdits {
 		return nil, fmt.Errorf("atomic block edit count %d outside 1..%d", len(edits), maxAtomicBlockEdits)
 	}
@@ -95,6 +108,9 @@ func (w *World) SetBlocks(edits []BlockEdit) ([]BlockState, error) {
 			return nil, fmt.Errorf("block edit %d at (%d,%d,%d): %w", i, edit.X, edit.Y, edit.Z, err)
 		}
 		old[i] = previous
+		if requireAir && !isAirBlock(previous) {
+			return nil, fmt.Errorf("placement target at (%d,%d,%d) is not air", edit.X, edit.Y, edit.Z)
+		}
 		changed = changed || editChanged
 	}
 	if !changed {
@@ -288,4 +304,8 @@ func equalBlockState(a, b BlockState) bool {
 		}
 	}
 	return true
+}
+
+func isAirBlock(state BlockState) bool {
+	return state.Name == "minecraft:air" || state.Name == "minecraft:cave_air" || state.Name == "minecraft:void_air"
 }
