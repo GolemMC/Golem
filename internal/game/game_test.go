@@ -214,6 +214,66 @@ func TestPlayerPersistenceLoadsAndAutosavesAuthoritativeState(t *testing.T) {
 	}
 }
 
+func TestCreativeInventoryClearPersistsAllPlayerSlots(t *testing.T) {
+	id := PlayerID{4}
+	store := &testPlayerStore{players: map[[16]byte]world.PlayerData{
+		[16]byte(id): {
+			Position: [3]float64{0.5, 64, 0.5},
+			Inventory: []world.InventoryItem{
+				{Slot: 0, ID: "minecraft:stone", Count: 64},
+				{Slot: 9, ID: "minecraft:dirt", Count: 32},
+				{Slot: 100, ID: "minecraft:diamond_boots", Count: 1},
+				{Slot: -106, ID: "minecraft:shield", Count: 1},
+			},
+			Raw:    make(map[string]any),
+			Exists: true,
+		},
+	}}
+	simulation, cancel := startTestGameWithPlayers(t, &testChunks{}, store)
+	defer cancel()
+	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stop()
+
+	joined, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder"}, make(chan Event, 256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(joined.Inventory) != 4 {
+		t.Fatalf("loaded inventory=%+v", joined.Inventory)
+	}
+
+	var inventory []ItemStack
+	for _, slot := range []int8{0, 9, 100, -106} {
+		inventory, err = simulation.SetCreativeInventorySlot(ctx, id, slot, ItemStack{})
+		if err != nil {
+			t.Fatalf("clear slot %d: %v", slot, err)
+		}
+	}
+	if len(inventory) != 0 {
+		t.Fatalf("inventory after clear=%+v", inventory)
+	}
+	if err := simulation.Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	saved := store.players[[16]byte(id)]
+	store.mu.Unlock()
+	if len(saved.Inventory) != 0 {
+		t.Fatalf("persisted inventory=%+v", saved.Inventory)
+	}
+	if err := simulation.Leave(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	rejoined, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder"}, make(chan Event, 256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejoined.Inventory) != 0 {
+		t.Fatalf("inventory after reconnect=%+v", rejoined.Inventory)
+	}
+}
+
 func TestFailedLeaveSaveIsRetriedByFinalSave(t *testing.T) {
 	id := PlayerID{9}
 	store := &testPlayerStore{players: make(map[[16]byte]world.PlayerData), saveErr: errors.New("disk unavailable")}
@@ -260,7 +320,7 @@ func TestCreativeBlockPlacementAndBreakingArePersistedAndBroadcast(t *testing.T)
 	if _, _, err := simulation.Join(ctx, Player{ID: PlayerID{2}, Username: "observer", Position: Vec3{Y: 64}}, observerEvents); err != nil {
 		t.Fatal(err)
 	}
-	if err := simulation.SetCreativeInventorySlot(ctx, builder, 0, ItemStack{ID: "minecraft:stone", Count: 64}); err != nil {
+	if _, err := simulation.SetCreativeInventorySlot(ctx, builder, 0, ItemStack{ID: "minecraft:stone", Count: 64}); err != nil {
 		t.Fatal(err)
 	}
 	position := BlockPos{X: 1, Y: 64, Z: 1}
@@ -295,7 +355,7 @@ func TestBlockDiskIODoesNotBlockSimulationLoop(t *testing.T) {
 	if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}}, make(chan Event, 256)); err != nil {
 		t.Fatal(err)
 	}
-	if err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:stone", Count: 1}); err != nil {
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:stone", Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -333,7 +393,7 @@ func TestPendingBlockWriteIsRejectedWithAuthoritativeResync(t *testing.T) {
 		if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}}, make(chan Event, 256)); err != nil {
 			t.Fatal(err)
 		}
-		if err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:stone", Count: int32(index + 1)}); err != nil {
+		if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:stone", Count: int32(index + 1)}); err != nil {
 			t.Fatal(err)
 		}
 	}

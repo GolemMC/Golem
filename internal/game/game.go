@@ -145,7 +145,7 @@ type SetCreativeSlot struct {
 	PlayerID PlayerID
 	Slot     int8
 	Item     ItemStack
-	reply    chan error
+	reply    chan creativeSlotReply
 }
 
 type ChangeBlock struct {
@@ -195,6 +195,11 @@ type joinReply struct {
 	self     Player
 	existing []Player
 	err      error
+}
+
+type creativeSlotReply struct {
+	inventory []ItemStack
+	err       error
 }
 
 type playerState struct {
@@ -643,17 +648,17 @@ func (g *Game) SelectHotbar(ctx context.Context, id PlayerID, slot int32) error 
 	}
 }
 
-func (g *Game) SetCreativeInventorySlot(ctx context.Context, id PlayerID, slot int8, item ItemStack) error {
-	reply := make(chan error, 1)
+func (g *Game) SetCreativeInventorySlot(ctx context.Context, id PlayerID, slot int8, item ItemStack) ([]ItemStack, error) {
+	reply := make(chan creativeSlotReply, 1)
 	item.Slot = slot
 	if err := g.submit(ctx, SetCreativeSlot{PlayerID: id, Slot: slot, Item: item, reply: reply}); err != nil {
-		return err
+		return nil, err
 	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-reply:
-		return err
+		return nil, ctx.Err()
+	case result := <-reply:
+		return result.inventory, result.err
 	}
 }
 
@@ -768,20 +773,20 @@ func (g *Game) handle(raw command) {
 func (g *Game) handleCreativeSlot(cmd SetCreativeSlot) {
 	player := g.players[cmd.PlayerID]
 	if player == nil {
-		cmd.reply <- errors.New("player is not active")
+		cmd.reply <- creativeSlotReply{err: errors.New("player is not active")}
 		return
 	}
 	if !validInventorySlot(cmd.Slot) {
-		cmd.reply <- fmt.Errorf("inventory slot %d is not editable", cmd.Slot)
+		cmd.reply <- creativeSlotReply{err: fmt.Errorf("inventory slot %d is not editable", cmd.Slot)}
 		return
 	}
 	if cmd.Item.Count < 0 || cmd.Item.Count > 99 || cmd.Item.Count > 0 && cmd.Item.ID == "" {
-		cmd.reply <- errors.New("creative item stack is invalid")
+		cmd.reply <- creativeSlotReply{err: errors.New("creative item stack is invalid")}
 		return
 	}
 	player.data.Inventory = setWorldInventoryItem(player.data.Inventory, cmd.Slot, cmd.Item)
 	player.player.Inventory = inventoryFromWorld(player.data.Inventory)
-	cmd.reply <- nil
+	cmd.reply <- creativeSlotReply{inventory: append([]ItemStack(nil), player.player.Inventory...)}
 }
 
 func (g *Game) handleChangeBlock(cmd ChangeBlock) {

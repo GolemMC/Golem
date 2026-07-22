@@ -259,7 +259,7 @@ func (s *Server) sendInitialPlay(connection net.Conn, codec protocol.FrameCodec,
 	if err := codec.Write(connection, protocol.PlayClientboundHeldItem, []byte{byte(self.SelectedHotbar)}); err != nil {
 		return err
 	}
-	inventory, err := inventoryContentPayload(self)
+	inventory, err := inventoryContentPayload(self.Inventory)
 	if err != nil {
 		return err
 	}
@@ -310,10 +310,10 @@ func (s *Server) sendInitialPlay(connection net.Conn, codec protocol.FrameCodec,
 	return codec.Write(connection, protocol.PlayClientboundSystemChat, message)
 }
 
-func inventoryContentPayload(player game.Player) ([]byte, error) {
+func inventoryContentPayload(inventory []game.ItemStack) ([]byte, error) {
 	items := make([]*game.ItemStack, 46)
-	for index := range player.Inventory {
-		item := player.Inventory[index]
+	for index := range inventory {
+		item := inventory[index]
 		networkSlot, ok := inventoryNetworkSlot(item.Slot)
 		if ok {
 			copy := item
@@ -675,13 +675,23 @@ func (s *Server) playLoop(ctx context.Context, player *playerSession) error {
 				return err
 			}
 		case protocol.PlayServerboundCreativeSlot:
-			slot, item, err := decodeCreativeSlot(payload)
+			change, err := decodeCreativeSlot(payload)
 			if err != nil {
 				return err
 			}
-			if slot >= 0 {
-				if err := s.game.SetCreativeInventorySlot(ctx, player.playerID, slot, item); err != nil {
+			if change.apply {
+				inventory, err := s.game.SetCreativeInventorySlot(ctx, player.playerID, change.slot, change.item)
+				if err != nil {
 					return err
+				}
+				if change.resync {
+					payload, err := inventoryContentPayload(inventory)
+					if err != nil {
+						return err
+					}
+					if err := player.sendSync(protocol.PlayClientboundInventoryContent, payload); err != nil {
+						return err
+					}
 				}
 			}
 		case protocol.PlayServerboundUseItemOn:
@@ -777,58 +787,64 @@ func decodeUseItemOn(payload []byte) (game.BlockPos, int32, bool, error) {
 	return game.BlockPos{X: x + offset.X, Y: y + offset.Y, Z: z + offset.Z}, sequence, hand == 0, nil
 }
 
-func decodeCreativeSlot(payload []byte) (int8, game.ItemStack, error) {
+type creativeSlotChange struct {
+	slot   int8
+	item   game.ItemStack
+	apply  bool
+	resync bool
+}
+
+func decodeCreativeSlot(payload []byte) (creativeSlotChange, error) {
 	decoder := protocol.NewDecoder(payload)
 	networkSlot, err := decoder.Int16()
 	if err != nil {
-		return 0, game.ItemStack{}, err
+		return creativeSlotChange{}, err
 	}
-	slot, keep, err := playerInventorySlot(networkSlot)
+	slot, apply, err := playerInventorySlot(networkSlot)
 	if err != nil {
-		return 0, game.ItemStack{}, err
+		return creativeSlotChange{}, err
 	}
 	count, err := decoder.VarInt()
 	if err != nil || count < 0 || count > 99 {
-		return 0, game.ItemStack{}, errors.New("invalid creative item count")
+		return creativeSlotChange{}, errors.New("invalid creative item count")
 	}
 	if count == 0 {
 		if decoder.Remaining() != 0 {
-			return 0, game.ItemStack{}, errors.New("empty creative slot has trailing data")
+			return creativeSlotChange{}, errors.New("empty creative slot has trailing data")
 		}
-		if !keep {
-			return -1, game.ItemStack{}, nil
-		}
-		return slot, game.ItemStack{Slot: slot}, nil
+		return creativeSlotChange{slot: slot, item: game.ItemStack{Slot: slot}, apply: apply, resync: networkSlot == 45}, nil
+	}
+	if networkSlot >= 0 && networkSlot <= 4 {
+		return creativeSlotChange{}, errors.New("creative crafting slots can only be cleared")
 	}
 	itemID, err := decoder.VarInt()
 	if err != nil || itemID < 0 {
-		return 0, game.ItemStack{}, errors.New("invalid creative item ID")
+		return creativeSlotChange{}, errors.New("invalid creative item ID")
 	}
 	added, err := decoder.VarInt()
 	if err != nil || added < 0 || added > 128 {
-		return 0, game.ItemStack{}, errors.New("invalid added-component count")
+		return creativeSlotChange{}, errors.New("invalid added-component count")
 	}
 	removed, err := decoder.VarInt()
 	if err != nil || removed < 0 || removed > 128 {
-		return 0, game.ItemStack{}, errors.New("invalid removed-component count")
+		return creativeSlotChange{}, errors.New("invalid removed-component count")
 	}
 	if added != 0 || removed != 0 || decoder.Remaining() != 0 {
-		return 0, game.ItemStack{}, errors.New("creative item components are not supported")
+		return creativeSlotChange{}, errors.New("creative item components are not supported")
 	}
 	item, exists, err := registry.ItemByID(itemID)
 	if err != nil || !exists || count > item.StackSize {
-		return 0, game.ItemStack{}, errors.New("unknown or oversized creative item")
+		return creativeSlotChange{}, errors.New("unknown or oversized creative item")
 	}
-	if !keep {
-		return -1, game.ItemStack{}, nil
-	}
-	return slot, game.ItemStack{Slot: slot, ID: "minecraft:" + item.Name, Count: count}, nil
+	return creativeSlotChange{slot: slot, item: game.ItemStack{Slot: slot, ID: "minecraft:" + item.Name, Count: count}, apply: apply}, nil
 }
 
 func playerInventorySlot(networkSlot int16) (int8, bool, error) {
 	switch {
 	case networkSlot == -1:
-		return -1, false, nil
+		return 0, false, nil
+	case networkSlot >= 0 && networkSlot <= 4:
+		return 0, false, nil
 	case networkSlot >= 9 && networkSlot <= 35:
 		return int8(networkSlot), true, nil
 	case networkSlot >= 36 && networkSlot <= 44:
