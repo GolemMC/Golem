@@ -908,8 +908,12 @@ func playerInventorySlot(networkSlot int16) (int8, bool, error) {
 }
 
 func (s *Server) finishBlockInteraction(player *playerSession, result game.BlockEditResult, sequence int32) error {
-	if result.State.Name != "" {
-		payload, err := blockUpdatePayload(result.Position, result.State)
+	updates := result.Updates
+	if len(updates) == 0 && result.State.Name != "" {
+		updates = []game.BlockChanged{{Position: result.Position, State: result.State}}
+	}
+	for _, update := range updates {
+		payload, err := blockUpdatePayload(update.Position, update.State)
 		if err != nil {
 			return err
 		}

@@ -58,11 +58,15 @@ func (w *World) SetBlocks(edits []BlockEdit) ([]BlockState, error) {
 
 // PlaceBlock changes one block only when the target is currently air.
 func (w *World) PlaceBlock(x, y, z int32, state BlockState) (BlockState, error) {
-	old, err := w.setBlocks([]BlockEdit{{X: x, Y: y, Z: z, State: state}}, true)
+	old, err := w.PlaceBlocks([]BlockEdit{{X: x, Y: y, Z: z, State: state}})
 	if err != nil {
 		return BlockState{}, err
 	}
 	return old[0], nil
+}
+
+func (w *World) PlaceBlocks(edits []BlockEdit) ([]BlockState, error) {
+	return w.setBlocks(edits, true)
 }
 
 func (w *World) setBlocks(edits []BlockEdit, requireAir bool) ([]BlockState, error) {

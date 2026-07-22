@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -232,12 +233,13 @@ type PlayerStore interface {
 type BlockStore interface {
 	GetBlock(x, y, z int32) (world.BlockState, error)
 	SetBlock(x, y, z int32, state world.BlockState) (world.BlockState, error)
-	PlaceBlock(x, y, z int32, state world.BlockState) (world.BlockState, error)
+	PlaceBlocks(edits []world.BlockEdit) ([]world.BlockState, error)
 }
 
 type BlockEditResult struct {
 	Position BlockPos
 	State    world.BlockState
+	Updates  []BlockChanged
 	Applied  bool
 	Err      error
 }
@@ -246,6 +248,7 @@ type blockTask struct {
 	playerID PlayerID
 	position BlockPos
 	state    world.BlockState
+	edits    []world.BlockEdit
 	place    bool
 	readOnly bool
 	rejected error
@@ -253,9 +256,10 @@ type blockTask struct {
 }
 
 type blockResult struct {
-	task  blockTask
-	state world.BlockState
-	err   error
+	task    blockTask
+	state   world.BlockState
+	updates []BlockChanged
+	err     error
 }
 
 type pendingBlockWrite struct {
@@ -447,27 +451,46 @@ func (g *Game) blockWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case task := <-g.blockTasks:
-			var state world.BlockState
-			var err error
+			updates := make([]BlockChanged, 0, len(task.edits))
+			var writeErr error
 			if task.readOnly {
-				state, err = g.blockStore.GetBlock(task.position.X, task.position.Y, task.position.Z)
-				if err == nil {
-					err = task.rejected
+				for _, edit := range task.edits {
+					state, err := g.blockStore.GetBlock(edit.X, edit.Y, edit.Z)
+					if err != nil {
+						writeErr = err
+						break
+					}
+					updates = append(updates, BlockChanged{Position: BlockPos{X: edit.X, Y: edit.Y, Z: edit.Z}, State: state})
+				}
+				if writeErr == nil {
+					writeErr = task.rejected
 				}
 			} else if task.place {
-				_, err = g.blockStore.PlaceBlock(task.position.X, task.position.Y, task.position.Z, task.state)
+				_, writeErr = g.blockStore.PlaceBlocks(task.edits)
 			} else {
-				_, err = g.blockStore.SetBlock(task.position.X, task.position.Y, task.position.Z, task.state)
+				_, writeErr = g.blockStore.SetBlock(task.position.X, task.position.Y, task.position.Z, task.state)
 			}
-			if err == nil {
-				state = task.state
-			} else {
-				state, _ = g.blockStore.GetBlock(task.position.X, task.position.Y, task.position.Z)
+			if !task.readOnly {
+				for _, edit := range task.edits {
+					state := edit.State
+					if writeErr != nil {
+						var err error
+						state, err = g.blockStore.GetBlock(edit.X, edit.Y, edit.Z)
+						if err != nil {
+							continue
+						}
+					}
+					updates = append(updates, BlockChanged{Position: BlockPos{X: edit.X, Y: edit.Y, Z: edit.Z}, State: state})
+				}
+			}
+			var state world.BlockState
+			if len(updates) != 0 {
+				state = updates[0].State
 			}
 			select {
 			case <-ctx.Done():
 				return
-			case g.blockResults <- blockResult{task: task, state: state, err: err}:
+			case g.blockResults <- blockResult{task: task, state: state, updates: updates, err: writeErr}:
 			}
 		}
 	}
@@ -835,6 +858,7 @@ func (g *Game) handleChangeBlock(cmd ChangeBlock) {
 		cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("block is outside interaction range")}
 		return
 	}
+	edits := []world.BlockEdit{{X: cmd.Position.X, Y: cmd.Position.Y, Z: cmd.Position.Z, State: cmd.State}}
 	if cmd.Place {
 		item, exists := selectedItem(player.player)
 		if !exists {
@@ -846,19 +870,17 @@ func (g *Game) handleChangeBlock(cmd ChangeBlock) {
 			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: fmt.Errorf("selected item cannot be placed: %w", err)}
 			return
 		}
-		// Blocks with state properties need contextual placement rules (facing,
-		// multipart neighbors, waterlogging, and similar). Refuse those until the
-		// rules exist instead of writing an invalid approximation to the world.
-		if len(definition.Properties) != 0 {
-			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: errors.New("selected block needs unsupported placement rules")}
+		edits, err = placementEdits(cmd.Position, player.player.Rotation.Yaw, definition)
+		if err != nil {
+			cmd.reply <- BlockEditResult{Position: cmd.Position, Err: err}
 			return
 		}
-		cmd.State = world.BlockState{Name: definition.Name, Properties: definition.Properties}
+		cmd.State = edits[0].State
 	}
 	chunk := ChunkPos{X: cmd.Position.X >> 4, Z: cmd.Position.Z >> 4}
 	if pending := g.pendingBlocks[chunk]; pending != nil {
 		rejected := errors.New("chunk already has a pending block write")
-		resync := blockTask{playerID: cmd.PlayerID, position: cmd.Position, readOnly: true, rejected: rejected, reply: cmd.reply}
+		resync := blockTask{playerID: cmd.PlayerID, position: cmd.Position, edits: edits, readOnly: true, rejected: rejected, reply: cmd.reply}
 		if cmd.Position == pending.task.position {
 			pending.waiters = append(pending.waiters, resync)
 			return
@@ -870,7 +892,7 @@ func (g *Game) handleChangeBlock(cmd ChangeBlock) {
 		}
 		return
 	}
-	task := blockTask{playerID: cmd.PlayerID, position: cmd.Position, state: cmd.State, place: cmd.Place, reply: cmd.reply}
+	task := blockTask{playerID: cmd.PlayerID, position: cmd.Position, state: cmd.State, edits: edits, place: cmd.Place, reply: cmd.reply}
 	select {
 	case g.blockTasks <- task:
 		g.pendingBlocks[chunk] = &pendingBlockWrite{task: task}
@@ -881,23 +903,67 @@ func (g *Game) handleChangeBlock(cmd ChangeBlock) {
 
 func (g *Game) handleBlockResult(result blockResult) {
 	if result.task.readOnly {
-		result.task.reply <- BlockEditResult{Position: result.task.position, State: result.state, Err: result.err}
+		result.task.reply <- BlockEditResult{Position: result.task.position, State: result.state, Updates: result.updates, Err: result.err}
 		return
 	}
 	chunk := ChunkPos{X: result.task.position.X >> 4, Z: result.task.position.Z >> 4}
 	pending := g.pendingBlocks[chunk]
 	delete(g.pendingBlocks, chunk)
-	edit := BlockEditResult{Position: result.task.position, State: result.state, Applied: result.err == nil, Err: result.err}
+	edit := BlockEditResult{Position: result.task.position, State: result.state, Updates: result.updates, Applied: result.err == nil, Err: result.err}
 	if result.err == nil {
 		g.invalidateChunk(chunk)
-		g.broadcast(BlockChanged{Position: result.task.position, State: result.state}, result.task.playerID)
+		for _, update := range result.updates {
+			g.broadcast(update, result.task.playerID)
+		}
 	}
 	result.task.reply <- edit
 	if pending != nil {
 		for _, waiter := range pending.waiters {
-			waiter.reply <- BlockEditResult{Position: waiter.position, State: result.state, Err: waiter.rejected}
+			select {
+			case g.blockTasks <- waiter:
+			default:
+				waiter.reply <- BlockEditResult{Position: waiter.position, Err: fmt.Errorf("%w; block read queue is full", waiter.rejected)}
+			}
 		}
 	}
+}
+
+func placementEdits(position BlockPos, yaw float32, definition registry.BlockStateDefinition) ([]world.BlockEdit, error) {
+	if strings.HasSuffix(definition.Name, "_door") {
+		properties := map[string]string{
+			"facing":  horizontalFacing(yaw),
+			"half":    "lower",
+			"hinge":   "left",
+			"open":    "false",
+			"powered": "false",
+		}
+		lower := world.BlockEdit{X: position.X, Y: position.Y, Z: position.Z, State: world.BlockState{Name: definition.Name, Properties: properties}}
+		upperProperties := make(map[string]string, len(properties))
+		for key, value := range properties {
+			upperProperties[key] = value
+		}
+		upperProperties["half"] = "upper"
+		upper := world.BlockEdit{X: position.X, Y: position.Y + 1, Z: position.Z, State: world.BlockState{Name: definition.Name, Properties: upperProperties}}
+		return []world.BlockEdit{lower, upper}, nil
+	}
+	if len(definition.Properties) != 0 && !isSnowyGround(definition.Properties) {
+		return nil, errors.New("selected block needs unsupported placement rules")
+	}
+	state := world.BlockState{Name: definition.Name, Properties: definition.Properties}
+	return []world.BlockEdit{{X: position.X, Y: position.Y, Z: position.Z, State: state}}, nil
+}
+
+func isSnowyGround(properties map[string]string) bool {
+	return len(properties) == 1 && properties["snowy"] == "false"
+}
+
+func horizontalFacing(yaw float32) string {
+	directions := [...]string{"south", "west", "north", "east"}
+	if math.IsNaN(float64(yaw)) || math.IsInf(float64(yaw), 0) {
+		return directions[0]
+	}
+	quarterTurn := int(math.Floor(float64(yaw)/90+0.5)) & 3
+	return directions[quarterTurn]
 }
 
 func (g *Game) handleJoin(cmd JoinPlayer) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GolemMC/Golem/internal/registry"
 	"github.com/GolemMC/Golem/internal/world"
 )
 
@@ -66,14 +67,38 @@ func (s *testBlockStore) SetBlock(x, y, z int32, state world.BlockState) (world.
 }
 
 func (s *testBlockStore) PlaceBlock(x, y, z int32, state world.BlockState) (world.BlockState, error) {
-	old, err := s.GetBlock(x, y, z)
+	old, err := s.PlaceBlocks([]world.BlockEdit{{X: x, Y: y, Z: z, State: state}})
 	if err != nil {
 		return world.BlockState{}, err
 	}
-	if old.Name != "minecraft:air" {
-		return world.BlockState{}, errors.New("occupied")
+	return old[0], nil
+}
+
+func (s *testBlockStore) PlaceBlocks(edits []world.BlockEdit) ([]world.BlockState, error) {
+	if s.started != nil {
+		s.startOnce.Do(func() { close(s.started) })
 	}
-	return s.SetBlock(x, y, z, state)
+	if s.gate != nil {
+		<-s.gate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := make([]world.BlockState, len(edits))
+	for index, edit := range edits {
+		state := s.blocks[BlockPos{X: edit.X, Y: edit.Y, Z: edit.Z}]
+		if state.Name == "" {
+			state.Name = "minecraft:air"
+		}
+		if state.Name != "minecraft:air" {
+			return nil, errors.New("occupied")
+		}
+		old[index] = state
+	}
+	for _, edit := range edits {
+		s.blocks[BlockPos{X: edit.X, Y: edit.Y, Z: edit.Z}] = edit.State
+		s.calls++
+	}
+	return old, nil
 }
 
 func (s *testPlayerStore) LoadPlayer(id [16]byte) (world.PlayerData, error) {
@@ -337,6 +362,156 @@ func TestCreativeBlockPlacementAndBreakingArePersistedAndBroadcast(t *testing.T)
 	store.mu.Unlock()
 	if calls != 2 || persisted.Name != "minecraft:air" {
 		t.Fatalf("calls=%d persisted=%+v", calls, persisted)
+	}
+}
+
+func TestGrassBlockPlacementUsesValidDefaultState(t *testing.T) {
+	store := &testBlockStore{blocks: make(map[BlockPos]world.BlockState)}
+	simulation, cancel := startTestGameWithStores(t, &testChunks{}, nil, store)
+	defer cancel()
+	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stop()
+	id := PlayerID{5}
+	if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}}, make(chan Event, 256)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:grass_block", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	position := BlockPos{X: 1, Y: 64, Z: 1}
+	result, err := simulation.PlaceBlock(ctx, id, position)
+	if err != nil || result.Err != nil || !result.Applied {
+		t.Fatalf("place result=%+v err=%v", result, err)
+	}
+	if result.State.Name != "minecraft:grass_block" || result.State.Properties["snowy"] != "false" {
+		t.Fatalf("grass state=%+v", result.State)
+	}
+	if _, err := registry.BlockStateID(result.State.Name, result.State.Properties); err != nil {
+		t.Fatalf("invalid grass state: %v", err)
+	}
+}
+
+func TestDoorPlacementCreatesBothHalves(t *testing.T) {
+	store := &testBlockStore{blocks: make(map[BlockPos]world.BlockState)}
+	simulation, cancel := startTestGameWithStores(t, &testChunks{}, nil, store)
+	defer cancel()
+	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stop()
+	observerEvents := make(chan Event, 256)
+	id := PlayerID{6}
+	if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}, Rotation: Rotation{Yaw: -90}}, make(chan Event, 256)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := simulation.Join(ctx, Player{ID: PlayerID{7}, Username: "observer", Position: Vec3{Y: 64}}, observerEvents); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:oak_door", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	position := BlockPos{X: 1, Y: 64, Z: 1}
+	result, err := simulation.PlaceBlock(ctx, id, position)
+	if err != nil || result.Err != nil || !result.Applied || len(result.Updates) != 2 {
+		t.Fatalf("place result=%+v err=%v", result, err)
+	}
+	wants := []struct {
+		position BlockPos
+		half     string
+	}{
+		{position: position, half: "lower"},
+		{position: BlockPos{X: 1, Y: 65, Z: 1}, half: "upper"},
+	}
+	for index, want := range wants {
+		update := result.Updates[index]
+		if update.Position != want.position || update.State.Name != "minecraft:oak_door" || update.State.Properties["half"] != want.half || update.State.Properties["facing"] != "east" {
+			t.Fatalf("update %d=%+v", index, update)
+		}
+		if _, err := registry.BlockStateID(update.State.Name, update.State.Properties); err != nil {
+			t.Fatalf("invalid door state %d: %v", index, err)
+		}
+		waitForBlockEvent(t, ctx, observerEvents, want.position, "minecraft:oak_door")
+	}
+	store.mu.Lock()
+	lower := store.blocks[position]
+	upper := store.blocks[BlockPos{X: 1, Y: 65, Z: 1}]
+	store.mu.Unlock()
+	if lower.Properties["half"] != "lower" || upper.Properties["half"] != "upper" {
+		t.Fatalf("persisted lower=%+v upper=%+v", lower, upper)
+	}
+}
+
+func TestDoorPlacementLeavesBothTargetsUnchangedWhenUpperIsOccupied(t *testing.T) {
+	upperPosition := BlockPos{X: 1, Y: 65, Z: 1}
+	store := &testBlockStore{blocks: map[BlockPos]world.BlockState{upperPosition: {Name: "minecraft:stone"}}}
+	simulation, cancel := startTestGameWithStores(t, &testChunks{}, nil, store)
+	defer cancel()
+	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stop()
+	id := PlayerID{8}
+	if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}}, make(chan Event, 256)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:iron_door", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := simulation.PlaceBlock(ctx, id, BlockPos{X: 1, Y: 64, Z: 1})
+	if err != nil || result.Err == nil || result.Applied || len(result.Updates) != 2 {
+		t.Fatalf("place result=%+v err=%v", result, err)
+	}
+	if result.Updates[0].State.Name != "minecraft:air" || result.Updates[1].State.Name != "minecraft:stone" {
+		t.Fatalf("authoritative updates=%+v", result.Updates)
+	}
+	store.mu.Lock()
+	lower, lowerExists := store.blocks[BlockPos{X: 1, Y: 64, Z: 1}]
+	upper := store.blocks[upperPosition]
+	store.mu.Unlock()
+	if lowerExists || lower.Name != "" || upper.Name != "minecraft:stone" {
+		t.Fatalf("lower=%+v exists=%v upper=%+v", lower, lowerExists, upper)
+	}
+}
+
+func TestEveryDoorItemBuildsValidPlacementStates(t *testing.T) {
+	doors := []string{
+		"iron_door", "oak_door", "spruce_door", "birch_door", "jungle_door",
+		"acacia_door", "cherry_door", "dark_oak_door", "mangrove_door", "bamboo_door",
+		"crimson_door", "warped_door", "copper_door", "exposed_copper_door",
+		"weathered_copper_door", "oxidized_copper_door", "waxed_copper_door",
+		"waxed_exposed_copper_door", "waxed_weathered_copper_door", "waxed_oxidized_copper_door",
+	}
+	for _, name := range doors {
+		definition, err := registry.DefaultBlockState("minecraft:" + name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		edits, err := placementEdits(BlockPos{X: 1, Y: 64, Z: 1}, 180, definition)
+		if err != nil || len(edits) != 2 {
+			t.Fatalf("%s edits=%+v err=%v", name, edits, err)
+		}
+		for _, edit := range edits {
+			if edit.State.Properties["facing"] != "north" {
+				t.Fatalf("%s facing=%q", name, edit.State.Properties["facing"])
+			}
+			if _, err := registry.BlockStateID(edit.State.Name, edit.State.Properties); err != nil {
+				t.Fatalf("%s state=%+v: %v", name, edit.State, err)
+			}
+		}
+	}
+}
+
+func TestHorizontalFacingRoundsPlayerYaw(t *testing.T) {
+	tests := []struct {
+		yaw  float32
+		want string
+	}{
+		{yaw: 0, want: "south"},
+		{yaw: 90, want: "west"},
+		{yaw: 180, want: "north"},
+		{yaw: -90, want: "east"},
+		{yaw: 360, want: "south"},
+	}
+	for _, test := range tests {
+		if got := horizontalFacing(test.yaw); got != test.want {
+			t.Fatalf("yaw %v facing=%q want=%q", test.yaw, got, test.want)
+		}
 	}
 }
 

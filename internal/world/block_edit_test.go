@@ -118,6 +118,42 @@ func TestPlaceBlockRequiresAirAndLeavesOccupiedTargetUnchanged(t *testing.T) {
 	}
 }
 
+func TestPlaceBlocksRequiresEveryTargetToBeAir(t *testing.T) {
+	dir := t.TempDir()
+	root := map[string]any{
+		"DataVersion": int32(version.WorldDataVersion), "xPos": int32(0), "zPos": int32(0),
+		"sections": []any{map[string]any{
+			"Y":            int8(4),
+			"block_states": map[string]any{"palette": []any{map[string]any{"Name": "minecraft:air"}}},
+			"biomes":       map[string]any{"palette": []any{"minecraft:plains"}},
+		}},
+	}
+	encoded, err := nbt.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestRegion(t, dir, encoded)
+	w := &World{Path: dir, regions: region.NewStore()}
+	if _, err := w.SetBlock(1, 65, 1, BlockState{Name: "minecraft:stone"}); err != nil {
+		t.Fatal(err)
+	}
+	edits := []BlockEdit{
+		{X: 1, Y: 64, Z: 1, State: BlockState{Name: "minecraft:oak_door", Properties: map[string]string{"facing": "south", "half": "lower", "hinge": "left", "open": "false", "powered": "false"}}},
+		{X: 1, Y: 65, Z: 1, State: BlockState{Name: "minecraft:oak_door", Properties: map[string]string{"facing": "south", "half": "upper", "hinge": "left", "open": "false", "powered": "false"}}},
+	}
+	if _, err := w.PlaceBlocks(edits); err == nil {
+		t.Fatal("door placement replaced an occupied upper target")
+	}
+	lower, err := w.GetBlock(1, 64, 1)
+	if err != nil || lower.Name != "minecraft:air" {
+		t.Fatalf("lower target changed: state=%+v err=%v", lower, err)
+	}
+	upper, err := w.GetBlock(1, 65, 1)
+	if err != nil || upper.Name != "minecraft:stone" {
+		t.Fatalf("upper target changed: state=%+v err=%v", upper, err)
+	}
+}
+
 func TestSetBlocksValidationLeavesRegionUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	root := map[string]any{
