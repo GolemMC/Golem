@@ -448,6 +448,62 @@ func TestCreativeClearPrefixDoesNotClearInventory(t *testing.T) {
 	}
 }
 
+func TestFinishBlockInteractionSendsEveryChangedBlock(t *testing.T) {
+	server, _, cancelGame := testServer(t)
+	defer cancelGame()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverConnection, clientConnection := net.Pipe()
+	defer clientConnection.Close()
+	codec := protocol.FrameCodec{MaxPacketBytes: 2 << 20, CompressionThreshold: -1}
+	player := newPlayerSession(ctx, server, auth.Identity{Username: "builder"}, game.Player{}, serverConnection, codec, make(chan game.Event, 1))
+	defer player.cancel()
+	player.startWriter()
+
+	lower := world.BlockState{Name: "minecraft:oak_door", Properties: map[string]string{"facing": "south", "half": "lower", "hinge": "left", "open": "false", "powered": "false"}}
+	upper := world.BlockState{Name: "minecraft:oak_door", Properties: map[string]string{"facing": "south", "half": "upper", "hinge": "left", "open": "false", "powered": "false"}}
+	updates := []game.BlockChanged{
+		{Position: game.BlockPos{X: 1, Y: 64, Z: 1}, State: lower},
+		{Position: game.BlockPos{X: 1, Y: 65, Z: 1}, State: upper},
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.finishBlockInteraction(player, game.BlockEditResult{Position: updates[0].Position, State: lower, Updates: updates, Applied: true}, 12)
+	}()
+
+	for index, want := range updates {
+		packetID, payload, err := codec.Read(clientConnection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if packetID != protocol.PlayClientboundBlockUpdate {
+			t.Fatalf("packet %d=%x, want block update", index, packetID)
+		}
+		decoder := protocol.NewDecoder(payload)
+		x, y, z, err := decoder.Position()
+		if err != nil || (game.BlockPos{X: x, Y: y, Z: z}) != want.Position {
+			t.Fatalf("update %d position=(%d,%d,%d) err=%v", index, x, y, z, err)
+		}
+		stateID, err := decoder.VarInt()
+		wantID, wantErr := registry.BlockStateID(want.State.Name, want.State.Properties)
+		if err != nil || wantErr != nil || stateID != wantID || decoder.Remaining() != 0 {
+			t.Fatalf("update %d state=%d want=%d err=%v wantErr=%v", index, stateID, wantID, err, wantErr)
+		}
+	}
+	packetID, payload, err := codec.Read(clientConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := protocol.NewDecoder(payload)
+	sequence, decodeErr := decoder.VarInt()
+	if packetID != protocol.PlayClientboundBlockChangedAck || decodeErr != nil || sequence != 12 || decoder.Remaining() != 0 {
+		t.Fatalf("ack packet=%x sequence=%d err=%v", packetID, sequence, decodeErr)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMandatoryOnlineLoginEncryptsAndVerifiesIdentity(t *testing.T) {
 	identity := auth.Identity{UUID: [16]byte{7}, Username: "OnlinePlayer"}
 	verifier := acceptingVerifier{identity: identity, hashSeen: make(chan string, 1)}
