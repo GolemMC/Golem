@@ -242,12 +242,9 @@ func TestCreativeInventoryClearPersistsAllPlayerSlots(t *testing.T) {
 		t.Fatalf("loaded inventory=%+v", joined.Inventory)
 	}
 
-	var inventory []ItemStack
-	for _, slot := range []int8{0, 9, 100, -106} {
-		inventory, err = simulation.SetCreativeInventorySlot(ctx, id, slot, ItemStack{})
-		if err != nil {
-			t.Fatalf("clear slot %d: %v", slot, err)
-		}
+	inventory, err := simulation.ClearCreativeInventory(ctx, id)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(inventory) != 0 {
 		t.Fatalf("inventory after clear=%+v", inventory)

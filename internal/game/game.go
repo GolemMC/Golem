@@ -148,6 +148,11 @@ type SetCreativeSlot struct {
 	reply    chan creativeSlotReply
 }
 
+type ClearCreativeInventory struct {
+	PlayerID PlayerID
+	reply    chan creativeSlotReply
+}
+
 type ChangeBlock struct {
 	PlayerID PlayerID
 	Position BlockPos
@@ -180,16 +185,17 @@ type SubscribeChunks struct {
 
 type command interface{ gameCommand() }
 
-func (JoinPlayer) gameCommand()      {}
-func (LeavePlayer) gameCommand()     {}
-func (SavePlayers) gameCommand()     {}
-func (SaveCompleted) gameCommand()   {}
-func (SelectHotbar) gameCommand()    {}
-func (SetCreativeSlot) gameCommand() {}
-func (ChangeBlock) gameCommand()     {}
-func (MovePlayer) gameCommand()      {}
-func (SendChat) gameCommand()        {}
-func (SubscribeChunks) gameCommand() {}
+func (JoinPlayer) gameCommand()             {}
+func (LeavePlayer) gameCommand()            {}
+func (SavePlayers) gameCommand()            {}
+func (SaveCompleted) gameCommand()          {}
+func (SelectHotbar) gameCommand()           {}
+func (SetCreativeSlot) gameCommand()        {}
+func (ClearCreativeInventory) gameCommand() {}
+func (ChangeBlock) gameCommand()            {}
+func (MovePlayer) gameCommand()             {}
+func (SendChat) gameCommand()               {}
+func (SubscribeChunks) gameCommand()        {}
 
 type joinReply struct {
 	self     Player
@@ -662,6 +668,19 @@ func (g *Game) SetCreativeInventorySlot(ctx context.Context, id PlayerID, slot i
 	}
 }
 
+func (g *Game) ClearCreativeInventory(ctx context.Context, id PlayerID) ([]ItemStack, error) {
+	reply := make(chan creativeSlotReply, 1)
+	if err := g.submit(ctx, ClearCreativeInventory{PlayerID: id, reply: reply}); err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-reply:
+		return result.inventory, result.err
+	}
+}
+
 func (g *Game) BreakBlock(ctx context.Context, id PlayerID, position BlockPos) (BlockEditResult, error) {
 	return g.changeBlock(ctx, ChangeBlock{PlayerID: id, Position: position, State: world.BlockState{Name: "minecraft:air"}})
 }
@@ -757,6 +776,8 @@ func (g *Game) handle(raw command) {
 		}
 	case SetCreativeSlot:
 		g.handleCreativeSlot(cmd)
+	case ClearCreativeInventory:
+		g.handleClearCreativeInventory(cmd)
 	case ChangeBlock:
 		g.handleChangeBlock(cmd)
 	case MovePlayer:
@@ -787,6 +808,17 @@ func (g *Game) handleCreativeSlot(cmd SetCreativeSlot) {
 	player.data.Inventory = setWorldInventoryItem(player.data.Inventory, cmd.Slot, cmd.Item)
 	player.player.Inventory = inventoryFromWorld(player.data.Inventory)
 	cmd.reply <- creativeSlotReply{inventory: append([]ItemStack(nil), player.player.Inventory...)}
+}
+
+func (g *Game) handleClearCreativeInventory(cmd ClearCreativeInventory) {
+	player := g.players[cmd.PlayerID]
+	if player == nil {
+		cmd.reply <- creativeSlotReply{err: errors.New("player is not active")}
+		return
+	}
+	player.data.Inventory = nil
+	player.player.Inventory = nil
+	cmd.reply <- creativeSlotReply{}
 }
 
 func (g *Game) handleChangeBlock(cmd ChangeBlock) {
