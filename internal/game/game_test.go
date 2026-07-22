@@ -375,7 +375,7 @@ func TestGrassBlockPlacementUsesValidDefaultState(t *testing.T) {
 	if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}}, make(chan Event, 256)); err != nil {
 		t.Fatal(err)
 	}
-	if err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:grass_block", Count: 1}); err != nil {
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:grass_block", Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	position := BlockPos{X: 1, Y: 64, Z: 1}
@@ -405,7 +405,7 @@ func TestDoorPlacementCreatesBothHalves(t *testing.T) {
 	if _, _, err := simulation.Join(ctx, Player{ID: PlayerID{7}, Username: "observer", Position: Vec3{Y: 64}}, observerEvents); err != nil {
 		t.Fatal(err)
 	}
-	if err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:oak_door", Count: 1}); err != nil {
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:oak_door", Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	position := BlockPos{X: 1, Y: 64, Z: 1}
@@ -450,7 +450,7 @@ func TestDoorPlacementLeavesBothTargetsUnchangedWhenUpperIsOccupied(t *testing.T
 	if _, _, err := simulation.Join(ctx, Player{ID: id, Username: "builder", Position: Vec3{Y: 64}}, make(chan Event, 256)); err != nil {
 		t.Fatal(err)
 	}
-	if err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:iron_door", Count: 1}); err != nil {
+	if _, err := simulation.SetCreativeInventorySlot(ctx, id, 0, ItemStack{ID: "minecraft:iron_door", Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := simulation.PlaceBlock(ctx, id, BlockPos{X: 1, Y: 64, Z: 1})
