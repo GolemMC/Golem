@@ -110,6 +110,41 @@ func TestEnvironmentAndCLIOverridePrecedence(t *testing.T) {
 	}
 }
 
+func TestDebugModeOverridesConfiguredLogLevel(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, DefaultPath)
+	data := "[world]\npath = \"./world\"\nbackup_directory = \"./backups\"\n[diagnostics]\naddress = \"127.0.0.1\"\n[logging]\nlevel = \"error\"\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, result, err := LoadOrCreate(path, []string{"GOLEM_DEBUG=true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Fatalf("environment debug level=%q", cfg.Logging.Level)
+	}
+
+	cfg.Logging.Level = "error"
+	if _, err := (Overrides{LogLevel: "warn", Debug: true}).Apply(&cfg, filepath.Dir(result.Path)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Fatalf("CLI debug level=%q", cfg.Logging.Level)
+	}
+}
+
+func TestInvalidDebugEnvironmentIsRejected(t *testing.T) {
+	cfg := Defaults()
+	if err := applyEnvironment(&cfg, []string{"GOLEM_DEBUG=sometimes"}); err == nil || !strings.Contains(err.Error(), "GOLEM_DEBUG") {
+		t.Fatalf("expected GOLEM_DEBUG error, got %v", err)
+	}
+}
+
 func TestParseBytes(t *testing.T) {
 	for input, expected := range map[string]int64{"0": 0, "512MiB": 512 << 20, "4GiB": 4 << 30, "100MB": 100_000_000} {
 		value, err := ParseBytes(input)

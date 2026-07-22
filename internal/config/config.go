@@ -311,6 +311,7 @@ type Overrides struct {
 	Listen            string
 	DiagnosticsListen string
 	LogLevel          string
+	Debug             bool
 	MaxProcs          *int
 	MemoryLimit       string
 	World             string
@@ -333,7 +334,9 @@ func (o Overrides) Apply(cfg *Config, base string) ([]string, error) {
 		}
 		cfg.Diagnostics.Address, cfg.Diagnostics.Port = address, port
 	}
-	if o.LogLevel != "" {
+	if o.Debug {
+		cfg.Logging.Level = "debug"
+	} else if o.LogLevel != "" {
 		cfg.Logging.Level = o.LogLevel
 	}
 	if o.MaxProcs != nil {
@@ -375,6 +378,15 @@ func applyEnvironment(cfg *Config, environ []string) error {
 	setString(values, "GOLEM_DIAGNOSTICS_TOKEN", &cfg.Diagnostics.BearerToken)
 	setString(values, "GOLEM_LOGGING_LEVEL", &cfg.Logging.Level)
 	setString(values, "GOLEM_LOGGING_FORMAT", &cfg.Logging.Format)
+	if value, ok := values["GOLEM_DEBUG"]; ok {
+		debug, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("environment GOLEM_DEBUG: %w", err)
+		}
+		if debug {
+			cfg.Logging.Level = "debug"
+		}
+	}
 	for key, target := range map[string]*int{
 		"GOLEM_SERVER_PORT":                             &cfg.Server.Port,
 		"GOLEM_SERVER_MAX_PLAYERS":                      &cfg.Server.MaxPlayers,

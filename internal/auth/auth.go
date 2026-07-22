@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package auth implements Minecraft's mandatory online-mode authentication.
+// package auth implements Minecrafts mandatory online mode authentication
 package auth
 
 import (

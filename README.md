@@ -97,6 +97,24 @@ use a custom config file with:
 ./build/golem --config /path/to/golem.toml
 ```
 
+## Logging
+
+Golem writes compact, human-readable console logs by default. Each entry shows a timestamp, level, message, and any useful context:
+
+```text
+[2026-07-22 18:42:10] INFO  player joined username=Alex uuid=...
+```
+
+Enable debug mode when diagnosing startup, networking, world, or player-session issues:
+
+```bash
+./build/golem --debug
+```
+
+Debug mode includes additional events, millisecond timestamps, source locations, and runtime details. It can also be enabled with `GOLEM_DEBUG=true` or permanently with `level = "debug"` under `[logging]` in `golem.toml`.
+
+Set `format = "json"` under `[logging]` when logs are consumed by a log collector. Set the standard `NO_COLOR` environment variable to disable terminal colors in text mode.
+
 ## First Launch
 When Golem starts without an existing config file, it creates `golem.toml` automatically.
 
