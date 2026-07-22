@@ -46,7 +46,7 @@ func (a *Server) Run(parent context.Context, stdin io.Reader) error {
 	}
 	a.world = w
 	a.auth = auth.NewMojangVerifier(a.cfg.Auth.LoginTimeout.Duration)
-	a.game = game.New(a.cfg.Server.ViewDistance, a.cfg.Network.ChunkWorkers, w, a.log)
+	a.game = game.New(a.cfg.Server.ViewDistance, a.cfg.Network.ChunkWorkers, w, w, w, a.log)
 	netServer, err := session.New(session.Config{Server: a.cfg.Server, Auth: a.cfg.Auth, Network: a.cfg.Network}, session.Spawn{X: w.Metadata.Spawn.X, Y: w.Metadata.Spawn.Y, Z: w.Metadata.Spawn.Z}, a.game, a.auth, a.log)
 	if err != nil {
 		_ = w.Close(context.Background())
@@ -65,7 +65,12 @@ func (a *Server) Run(parent context.Context, stdin io.Reader) error {
 		}
 	}
 	a.log.Info("server starting", "server_version", version.ServerVersion, "minecraft_version", version.MinecraftVersion, "protocol", version.ProtocolVersion, "world", a.cfg.World.Path, "online_mode", true, "listen", fmt.Sprintf("%s:%d", a.cfg.Server.Address, a.cfg.Server.Port), "max_players", a.cfg.Server.MaxPlayers, "diagnostics", fmt.Sprintf("%s:%d", a.cfg.Diagnostics.Address, a.cfg.Diagnostics.Port), "backup", w.BackupPath)
-	go a.game.Run(ctx)
+	gameCtx, stopGame := context.WithCancel(context.WithoutCancel(parent))
+	gameDone := make(chan struct{})
+	go func() {
+		defer close(gameDone)
+		a.game.Run(gameCtx)
+	}()
 	if stdin != nil {
 		go runConsole(ctx, stdin, a.log, a, cancel)
 	}
@@ -108,12 +113,14 @@ func (a *Server) Run(parent context.Context, stdin io.Reader) error {
 			runErr = fmt.Errorf("shutdown diagnostics: %w", err)
 		}
 	}
-	if err := a.world.Close(shutdownCtx); err != nil {
+	if err := a.world.CloseWith(shutdownCtx, a.game.Save); err != nil {
 		a.log.Error("shutdown persistence failed", "error", err)
 		if runErr == nil {
 			runErr = err
 		}
 	}
+	stopGame()
+	<-gameDone
 	if runErr == nil {
 		a.log.Info("graceful shutdown complete")
 	}
@@ -124,7 +131,10 @@ func (a *Server) Save(ctx context.Context) error {
 	if a.world == nil {
 		return errors.New("world is not open")
 	}
-	return a.world.Save(ctx)
+	if a.game == nil {
+		return errors.New("game is not running")
+	}
+	return a.world.SaveWith(ctx, a.game.Save)
 }
 func (a *Server) Online() int {
 	if a.sessions == nil {

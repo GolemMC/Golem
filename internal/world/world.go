@@ -38,6 +38,7 @@ type World struct {
 	BackupPath   string
 	lock         *Lock
 	mu           sync.RWMutex
+	saveMu       sync.Mutex
 	save         SaveState
 	loadedChunks int
 	loaded       map[[2]int32]struct{}
@@ -81,6 +82,14 @@ func (w *World) LoadedChunks() int    { w.mu.RLock(); defer w.mu.RUnlock(); retu
 func (w *World) SaveState() SaveState { w.mu.RLock(); defer w.mu.RUnlock(); return w.save }
 
 func (w *World) Save(ctx context.Context) error {
+	return w.SaveWith(ctx, nil)
+}
+
+// SaveWith coordinates additional persistence work under the world's save
+// state so diagnostics and console saves report the complete result.
+func (w *World) SaveWith(ctx context.Context, persist func(context.Context) error) error {
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
 	w.mu.Lock()
 	w.save.Phase = SaveSaving
 	w.save.LastError = ""
@@ -91,13 +100,21 @@ func (w *World) Save(ctx context.Context) error {
 		return ctx.Err()
 	default:
 	}
+	if persist != nil {
+		if err := persist(ctx); err != nil {
+			w.recordSaveError(err)
+			return err
+		}
+	}
 	// The first rebuilt milestone streams chunks read-only. Later gameplay
 	// writers will register dirty work here before save coordination expands.
 	w.mu.Lock()
 	w.save.Phase = SaveIdle
 	w.save.LastSuccess = time.Now()
 	w.mu.Unlock()
-	w.log.Debug("world save state recorded")
+	if w.log != nil {
+		w.log.Debug("world save state recorded")
+	}
 	return nil
 }
 
@@ -109,11 +126,16 @@ func (w *World) recordSaveError(err error) {
 }
 
 func (w *World) Close(ctx context.Context) error {
+	return w.CloseWith(ctx, nil)
+}
+
+// CloseWith completes coordinated persistence before releasing the world lock.
+func (w *World) CloseWith(ctx context.Context, persist func(context.Context) error) error {
 	if w == nil {
 		return nil
 	}
 	var saveErr error
-	if err := w.Save(ctx); err != nil {
+	if err := w.SaveWith(ctx, persist); err != nil {
 		saveErr = fmt.Errorf("final world save: %w", err)
 	}
 	var lockErr error

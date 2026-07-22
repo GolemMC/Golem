@@ -20,6 +20,7 @@ import (
 	"github.com/GolemMC/Golem/internal/config"
 	"github.com/GolemMC/Golem/internal/game"
 	"github.com/GolemMC/Golem/internal/protocol"
+	"github.com/GolemMC/Golem/internal/registry"
 	"github.com/GolemMC/Golem/internal/version"
 	"github.com/GolemMC/Golem/internal/world"
 )
@@ -173,13 +174,17 @@ func TestAuthenticatedConfigurationReachesPlayLogin(t *testing.T) {
 	if err := codec.Write(clientConnection, protocol.ConfigServerboundFinish, nil); err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < 9; index++ {
-		id, _, err = codec.Read(clientConnection)
+	var payload []byte
+	for index := 0; index < 10; index++ {
+		id, payload, err = codec.Read(clientConnection)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if index == 0 && id != protocol.PlayClientboundLogin {
 			t.Fatalf("first play packet=%x", id)
+		}
+		if id == protocol.PlayClientboundAbilities && (len(payload) != 9 || payload[0]&0x02 != 0) {
+			t.Fatalf("spawn abilities incorrectly enable flying: %x", payload)
 		}
 	}
 	cancel()
@@ -188,6 +193,47 @@ func TestAuthenticatedConfigurationReachesPlayLogin(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("play session did not shut down")
+	}
+}
+
+func TestProtocol767BlockInteractionDecoders(t *testing.T) {
+	var action protocol.Encoder
+	action.VarInt(0)
+	action.Position(1, 64, -2)
+	action.WriteByte(1)
+	action.VarInt(42)
+	kind, position, sequence, err := decodePlayerAction(action.Bytes())
+	if err != nil || kind != 0 || position != (game.BlockPos{X: 1, Y: 64, Z: -2}) || sequence != 42 {
+		t.Fatalf("player action kind=%d position=%+v sequence=%d err=%v", kind, position, sequence, err)
+	}
+
+	var placement protocol.Encoder
+	placement.VarInt(0)
+	placement.Position(1, 63, 1)
+	placement.VarInt(1)
+	placement.Float32(0.5)
+	placement.Float32(1)
+	placement.Float32(0.5)
+	placement.Bool(false)
+	placement.VarInt(7)
+	target, sequence, mainHand, err := decodeUseItemOn(placement.Bytes())
+	if err != nil || !mainHand || target != (game.BlockPos{X: 1, Y: 64, Z: 1}) || sequence != 7 {
+		t.Fatalf("placement target=%+v sequence=%d main=%v err=%v", target, sequence, mainHand, err)
+	}
+
+	stone, exists, err := registry.ItemByName("minecraft:stone")
+	if err != nil || !exists {
+		t.Fatal("stone item is unavailable")
+	}
+	var creative protocol.Encoder
+	creative.Int16(36)
+	creative.VarInt(64)
+	creative.VarInt(stone.ID)
+	creative.VarInt(0)
+	creative.VarInt(0)
+	slot, item, err := decodeCreativeSlot(creative.Bytes())
+	if err != nil || slot != 0 || item.ID != "minecraft:stone" || item.Count != 64 {
+		t.Fatalf("creative slot=%d item=%+v err=%v", slot, item, err)
 	}
 }
 
@@ -321,7 +367,7 @@ func testServerWithVerifier(t *testing.T, verifier auth.Verifier) (*Server, *gam
 }
 
 func startSimulationForTest() (*game.Game, context.CancelFunc) {
-	simulation := game.New(2, 2, missingChunks{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	simulation := game.New(2, 2, missingChunks{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	go simulation.Run(ctx)
 	return simulation, cancel

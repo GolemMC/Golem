@@ -35,6 +35,24 @@ func TestPlayerDataRoundTripPreservesUnknownFields(t *testing.T) {
 	}
 }
 
+func TestSavePlayerDoesNotMutateCallerData(t *testing.T) {
+	w := &World{Path: t.TempDir()}
+	player := PlayerData{
+		Position:  [3]float64{1, 64, 2},
+		Raw:       map[string]any{"CustomField": "kept"},
+		Inventory: []InventoryItem{{Slot: 0, ID: "minecraft:stone", Count: 1, Raw: map[string]any{"CustomItemField": "kept"}}},
+	}
+	if err := w.SavePlayer(context.Background(), [16]byte{1}, player); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := player.Raw["Pos"]; exists {
+		t.Fatal("SavePlayer mutated the caller's raw player compound")
+	}
+	if _, exists := player.Inventory[0].Raw["count"]; exists {
+		t.Fatal("SavePlayer mutated the caller's raw inventory compound")
+	}
+}
+
 func TestMalformedPlayerDataIsNotOverwrittenByLoad(t *testing.T) {
 	w := &World{Path: t.TempDir()}
 	id := [16]byte{1}

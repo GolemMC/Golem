@@ -38,6 +38,9 @@ Current features:
 - Vanilla Minecraft 1.21.1 client connections
 - Existing Overworld chunk loading
 - Basic player movement
+- Player position, rotation and selected-hotbar persistence
+- Autosave, disconnect and graceful-shutdown save coordination
+- Persistent creative block placement and breaking
 - Multiplayer chat
 - Server diagnostics
 - Terminal commands
@@ -51,6 +54,7 @@ Current limitations include:
 - Minecraft Java Edition 1.21.1 only
 - Overworld only
 - No terrain generation
+- Block placement currently supports simple blocks without state properties; contextual placement rules are incomplete
 - No Survival mode
 - No plugin system
 - No multi-version protocol support

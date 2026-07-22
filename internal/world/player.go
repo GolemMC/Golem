@@ -89,10 +89,7 @@ func (w *World) SavePlayer(ctx context.Context, id [16]byte, player PlayerData) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	raw := player.Raw
-	if raw == nil {
-		raw = make(map[string]any)
-	}
+	raw := cloneNBTCompound(player.Raw)
 	raw["Pos"] = []float64{player.Position[0], player.Position[1], player.Position[2]}
 	raw["Rotation"] = []float32{player.Rotation[0], player.Rotation[1]}
 	raw["playerGameType"] = int32(1)
@@ -100,10 +97,7 @@ func (w *World) SavePlayer(ctx context.Context, id [16]byte, player PlayerData) 
 	raw["Dimension"] = "minecraft:overworld"
 	inventory := make([]any, 0, len(player.Inventory))
 	for _, item := range player.Inventory {
-		entry := item.Raw
-		if entry == nil {
-			entry = make(map[string]any)
-		}
+		entry := cloneNBTCompound(item.Raw)
 		entry["Slot"] = item.Slot
 		entry["id"] = item.ID
 		entry["count"] = item.Count
@@ -130,6 +124,35 @@ func (w *World) SavePlayer(ctx context.Context, id [16]byte, player PlayerData) 
 		return fmt.Errorf("save player data %q: %w", path, err)
 	}
 	return nil
+}
+
+func cloneNBTCompound(source map[string]any) map[string]any {
+	copy := make(map[string]any, len(source))
+	for key, value := range source {
+		copy[key] = cloneNBTValue(value)
+	}
+	return copy
+}
+
+func cloneNBTValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneNBTCompound(value)
+	case []any:
+		copy := make([]any, len(value))
+		for index := range value {
+			copy[index] = cloneNBTValue(value[index])
+		}
+		return copy
+	case []byte:
+		return append([]byte(nil), value...)
+	case []int32:
+		return append([]int32(nil), value...)
+	case []int64:
+		return append([]int64(nil), value...)
+	default:
+		return value
+	}
 }
 
 func decodeInventory(value any) ([]InventoryItem, error) {
