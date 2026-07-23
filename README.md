@@ -73,15 +73,7 @@ The labels below are intentionally conservative:
 
 ## What should come next
 
-The live backlog is tracked in the [Golem Roadmap](https://github.com/orgs/GolemMC/projects/1). The next useful milestones are:
-
-1. Finish inventory and container rules, including item components, crafting, armor validation, and ordinary inventory clicks.
-2. Add correct placement rules for directional, waterlogged, multipart, and block-entity-backed blocks.
-3. Build the minimum Survival loop: health, hunger, damage, drops, tools, experience, and respawning.
-4. Connect loaded entities to the game loop, then add ticking, movement, spawning, and saving.
-5. Add terrain generation and dimension support without weakening the existing world-safety checks.
-6. Expand commands and permissions before designing a stable plugin API.
-7. Add protocol fuzzing, long-running multiplayer tests, and benchmarks before publishing an alpha release.
+The live backlog is tracked in the [Golem Roadmap](https://github.com/orgs/GolemMC/projects/1). For major upcoming milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 

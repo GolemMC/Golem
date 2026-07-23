@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+
+	"github.com/GolemMC/Golem/internal/version"
 )
 
 type consoleActions interface {
@@ -38,8 +40,10 @@ func runConsole(ctx context.Context, reader io.Reader, log *slog.Logger, actions
 		case "list":
 			online, maximum := actions.Players()
 			log.Info("players online", "current", online, "maximum", maximum)
+		case "version":
+			log.Info("server version", "golem", version.ServerVersion, "minecraft", version.MinecraftVersion)
 		case "help":
-			log.Info("console commands", "commands", "stop, save, list, help")
+			log.Info("console commands", "commands", "stop, save, list, version, help")
 		default:
 			log.Warn("unknown console command", "command", scanner.Text())
 		}
