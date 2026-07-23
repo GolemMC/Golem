@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -312,16 +313,18 @@ func rewriteChunk(path string, localX, localZ int, nbtData []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		return err
-	}
-	if err := d.Close(); err != nil {
-		return err
+	if runtime.GOOS != "windows" {
+		d, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		if err := d.Sync(); err != nil {
+			_ = d.Close()
+			return err
+		}
+		if err := d.Close(); err != nil {
+			return err
+		}
 	}
 	ok = true
 	return nil

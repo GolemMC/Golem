@@ -21,7 +21,7 @@ Draft pull requests are welcome when you want early feedback.
 
 You need:
 
-- a Linux machine (WSL, a server or your own machine)
+- a Windows, macOS, or Linux machine
 - Go 1.24 or newer
 - Git
 - Make

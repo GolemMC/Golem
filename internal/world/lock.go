@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -22,7 +21,7 @@ func AcquireLock(worldPath string) (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open world lock %q: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFile(f); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("world %q is already in use (cannot acquire session.lock): %w", worldPath, err)
 	}
@@ -49,7 +48,7 @@ func (l *Lock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	err1 := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	err1 := unlockFile(l.file)
 	err2 := l.file.Close()
 	l.file = nil
 	if err1 != nil {

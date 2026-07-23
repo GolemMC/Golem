@@ -17,7 +17,7 @@ Golem is not a replacement for a vanilla or Paper server yet. Use a copied or di
 - Minecraft Java Edition 1.21.1
 - Protocol 767
 - World data version 3955
-- Linux
+- Windows, macOS, Linux
 - Online mode only
 
 Other client versions, offline mode, Bedrock Edition, and additional dimensions are not supported.
@@ -68,7 +68,7 @@ The labels below are intentionally conservative:
 - **Working:** compact text logs, JSON logs, and debug logging
 - **Working:** health, readiness, Prometheus metrics, and JSON diagnostics endpoints
 - **Working:** `help`, `list`, `save`, and `stop` console commands
-- **Working:** graceful shutdown and Linux builds without CGO
+- **Working:** graceful shutdown and builds without CGO
 - **Planned:** RCON, query, permissions, proxy support, and a public plugin API
 
 ## What should come next
@@ -85,7 +85,7 @@ The live backlog is tracked in the [Golem Roadmap](https://github.com/orgs/Golem
 
 ## Requirements
 
-- Linux
+- Windows, macOS, or Linux
 - Go 1.24 or newer
 - Git and Make
 - An existing Minecraft Java Edition 1.21.1 world
@@ -101,7 +101,7 @@ cd Golem
 make build
 ```
 
-The Linux binary is written to `build/golem`.
+The compiled binary is written to the `build/` directory.
 
 ## Run
 
